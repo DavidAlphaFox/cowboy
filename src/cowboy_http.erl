@@ -183,7 +183,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 			%% Only reset the timeout if it is idle_timeout (active streams).
 			State1 = case Streams of
 				[] -> State;
-				_ -> set_timeout(State)
+				_ -> set_timeout(State) % when streams is not empty we should set timer 
 			end,
 			parse(<< Buffer/binary, Data/binary >>, State1);
 		{Closed, Socket} ->
@@ -242,7 +242,7 @@ cancel_timeout(State=#state{timer=TimerRef}) ->
 		_ -> erlang:cancel_timer(TimerRef, [{async, true}, {info, false}])
 	end,
 	State#state{timer=undefined}.
-
+% deal with timeout
 -spec timeout(_, _) -> no_return().
 timeout(State=#state{in_state=#ps_request_line{}}, request_timeout) ->
 	terminate(State, {connection_error, timeout,
