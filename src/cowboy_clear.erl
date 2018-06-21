@@ -17,7 +17,7 @@
 
 -export([start_link/4]).
 -export([connection_process/5]).
-
+% start the protocol socket from ranch
 -spec start_link(ranch:ref(), inet:socket(), module(), cowboy:opts()) -> {ok, pid()}.
 start_link(Ref, Socket, Transport, Opts) ->
 	Pid = proc_lib:spawn_link(?MODULE, connection_process,
@@ -28,7 +28,7 @@ start_link(Ref, Socket, Transport, Opts) ->
 connection_process(Parent, Ref, Socket, Transport, Opts) ->
 	ok = ranch:accept_ack(Ref),
 	init(Parent, Ref, Socket, Transport, Opts, cowboy_http).
-
+% use cowboy_http as default protocol
 init(Parent, Ref, Socket, Transport, Opts, Protocol) ->
 	_ = case maps:get(connection_type, Opts, supervisor) of
 		worker -> ok;

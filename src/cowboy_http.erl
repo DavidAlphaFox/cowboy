@@ -127,11 +127,11 @@
 
 -include_lib("cowlib/include/cow_inline.hrl").
 -include_lib("cowlib/include/cow_parse.hrl").
-
+% init protocol
 -spec init(pid(), ranch:ref(), inet:socket(), module(), cowboy:opts()) -> ok.
 init(Parent, Ref, Socket, Transport, Opts) ->
-	Peer0 = Transport:peername(Socket),
-	Sock0 = Transport:sockname(Socket),
+	Peer0 = Transport:peername(Socket), % get remote address and port 
+	Sock0 = Transport:sockname(Socket), % get local address and port
 	Cert1 = case Transport:name() of
 		ssl ->
 			case ssl:peercert(Socket) of
