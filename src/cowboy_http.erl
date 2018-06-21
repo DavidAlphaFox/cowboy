@@ -171,13 +171,13 @@ before_loop(State=#state{socket=Socket, transport=Transport}, Buffer) ->
 loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 		timer=TimerRef, children=Children, in_streamid=InStreamID,
 		last_streamid=LastStreamID, streams=Streams}, Buffer) ->
-	{OK, Closed, Error} = Transport:messages(),
+	{OK, Closed, Error} = Transport:messages(),% get default message label from transport
 	InactivityTimeout = maps:get(inactivity_timeout, Opts, 300000),
 	receive
 		%% Discard data coming in after the last request
 		%% we want to process was received fully.
 		{OK, Socket, _} when InStreamID > LastStreamID ->
-			before_loop(State, Buffer);
+			before_loop(State, Buffer); % if current stream identity is bigger the last one we must discard
 		%% Socket messages.
 		{OK, Socket, Data} ->
 			%% Only reset the timeout if it is idle_timeout (active streams).
