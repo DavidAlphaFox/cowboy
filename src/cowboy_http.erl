@@ -145,7 +145,7 @@ init(Parent, Ref, Socket, Transport, Opts) ->
 	end,
 	case {Peer0, Sock0, Cert1} of
 		{{ok, Peer}, {ok, Sock}, {ok, Cert}} ->
-			LastStreamID = maps:get(max_keepalive, Opts, 100),
+			LastStreamID = maps:get(max_keepalive, Opts, 100), % set default last_streamid from configuration
 			before_loop(set_timeout(#state{
 				parent=Parent, ref=Ref, socket=Socket,
 				transport=Transport, opts=Opts,
@@ -185,7 +185,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 				[] -> State;
 				_ -> set_timeout(State) % when streams is not empty we should set timer 
 			end,
-			parse(<< Buffer/binary, Data/binary >>, State1);
+			parse(<< Buffer/binary, Data/binary >>, State1); %% parse data
 		{Closed, Socket} ->
 			terminate(State, {socket_error, closed, 'The socket has been closed.'});
 		{Error, Socket, Reason} ->
@@ -262,7 +262,7 @@ parse(_, State=#state{in_streamid=InStreamID, in_state=#ps_request_line{},
 		last_streamid=LastStreamID}) when InStreamID > LastStreamID ->
 	before_loop(State, <<>>);
 parse(Buffer, State=#state{in_state=#ps_request_line{empty_lines=EmptyLines}}) ->
-	after_parse(parse_request(Buffer, State, EmptyLines));
+	after_parse(parse_request(Buffer, State, EmptyLines)); %% we wait for an empty line header is finished 
 parse(Buffer, State=#state{in_state=PS=#ps_header{headers=Headers, name=undefined}}) ->
 	after_parse(parse_header(Buffer,
 		State#state{in_state=PS#ps_header{headers=undefined}},
@@ -367,13 +367,15 @@ parse_request(Buffer, State=#state{opts=Opts, in_streamid=InStreamID}, EmptyLine
 				%% Accept direct HTTP/2 only at the beginning of the connection.
 				<< "PRI * HTTP/2.0\r\n", _/bits >> when InStreamID =:= 1 ->
 					%% @todo Might be worth throwing to get a clean stacktrace.
-					http2_upgrade(State, Buffer);
+          %% upgrade to http2 
+          http2_upgrade(State, Buffer);
 				_ ->
+          %% parse method
 					parse_method(Buffer, State, <<>>,
 						maps:get(max_method_length, Opts, 32))
 			end
 	end.
-
+%% find the location of \n in the line
 match_eol(<< $\n, _/bits >>, N) ->
 	N;
 match_eol(<< _, Rest/bits >>, N) ->
@@ -480,7 +482,7 @@ parse_version(<< C, _/bits >>, State, _, _, _, _) when C =:= $\s; C =:= $\t ->
 parse_version(_, State, _, _, _, _) ->
 	error_terminate(505, State, {connection_error, protocol_error,
 		'Unsupported HTTP version. (RFC7230 2.6)'}).
-
+%% after pase version we start parse headers 
 before_parse_headers(Rest, State, M, A, P, Q, V) ->
 	parse_header(Rest, State#state{in_state=#ps_header{
 		method=M, authority=A, path=P, qs=Q, version=V}}, #{}).
@@ -491,7 +493,7 @@ before_parse_headers(Rest, State, M, A, P, Q, V) ->
 parse_header(Rest, State=#state{in_state=PS}, Headers) when byte_size(Rest) < 2 ->
 	{more, State#state{in_state=PS#ps_header{headers=Headers}}, Rest};
 parse_header(<< $\r, $\n, Rest/bits >>, S, Headers) ->
-	request(Rest, S, Headers);
+	request(Rest, S, Headers); %% when we finish parsing headers we do request
 parse_header(Buffer, State=#state{opts=Opts, in_state=PS}, Headers) ->
 	MaxHeaders = maps:get(max_headers, Opts, 100),
 	NumHeaders = maps:size(Headers),
@@ -743,7 +745,7 @@ is_http2_upgrade(#{<<"connection">> := Conn, <<"upgrade">> := Upgrade,
 	end;
 is_http2_upgrade(_, _) ->
 	false.
-
+%% use PRI method direct upgrade 
 %% Prior knowledge upgrade, without an HTTP/1.1 request.
 http2_upgrade(State=#state{parent=Parent, ref=Ref, socket=Socket, transport=Transport,
 		opts=Opts, peer=Peer, sock=Sock, cert=Cert}, Buffer) ->
@@ -1167,7 +1169,7 @@ stream_terminate(State0=#state{opts=Opts, in_streamid=InStreamID, in_state=InSta
 
 stream_call_terminate(StreamID, Reason, StreamState) ->
 	try
-		cowboy_stream:terminate(StreamID, Reason, StreamState)
+		cowboy_stream:terminate(StreamID, Reason, StreamState) % terminate stream with cowboy_stream
 	catch Class:Exception ->
 		cowboy_stream:report_error(terminate,
 			[StreamID, Reason, StreamState],
@@ -1283,7 +1285,7 @@ early_error(StatusCode0, #state{socket=Socket, transport=Transport,
 terminate(undefined, Reason) ->
 	exit({shutdown, Reason});
 terminate(State=#state{streams=Streams, children=Children}, Reason) ->
-	terminate_all_streams(Streams, Reason),
+	terminate_all_streams(Streams, Reason),% terminate all streams
 	cowboy_children:terminate(Children),
 	terminate_linger(State),
 	exit({shutdown, Reason}).

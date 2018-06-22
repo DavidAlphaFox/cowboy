@@ -86,7 +86,7 @@
 %% Because the HTTP/1.1 and HTTP/2 handshakes are so different,
 %% this function is necessary to figure out whether a request
 %% is trying to upgrade to the Websocket protocol.
-
+%% http/2 with connect method
 -spec is_upgrade_request(cowboy_req:req()) -> boolean().
 is_upgrade_request(#{version := 'HTTP/2', method := <<"CONNECT">>, protocol := Protocol}) ->
 	<<"websocket">> =:= cowboy_bstr:to_lower(Protocol);
@@ -125,7 +125,7 @@ upgrade(Req0=#{version := Version}, Env, Handler, HandlerState, Opts) ->
 	State0 = #state{handler=Handler, timeout=Timeout, compress=Compress,
 		max_frame_size=MaxFrameSize, req=FilteredReq},
 	try websocket_upgrade(State0, Req0) of
-		{ok, State, Req} ->
+		{ok, State, Req} -> %% we can upgrade send the handshake now
 			websocket_handshake(State, Req, HandlerState, Env);
 		%% The status code 426 is specific to HTTP/1.1 connections.
 		{error, upgrade_required} when Version =:= 'HTTP/1.1' ->
@@ -233,7 +233,7 @@ websocket_handshake(State=#state{key=Key},
 		<<"connection">> => <<"Upgrade">>,
 		<<"upgrade">> => <<"websocket">>,
 		<<"sec-websocket-accept">> => Challenge
-	}, Req),
+	}, Req), %% switch protocol now
 	Pid ! {{Pid, StreamID}, {switch_protocol, Headers, ?MODULE, {State, HandlerState}}},
 	{ok, Req, Env};
 %% For HTTP/2 we do not let the process die, we instead keep it

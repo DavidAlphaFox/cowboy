@@ -172,7 +172,7 @@ init(Parent, Ref, Socket, Transport, Opts) ->
 			terminate(undefined, {socket_error, Reason,
 				'A socket error occurred when retrieving the client TLS certificate.'})
 	end.
-
+%% init from PRI directly
 -spec init(pid(), ranch:ref(), inet:socket(), module(), cowboy:opts(),
 	{inet:ip_address(), inet:port_number()}, {inet:ip_address(), inet:port_number()},
 	binary() | undefined, binary()) -> ok.
@@ -312,7 +312,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport,
 	after InactivityTimeout ->
 		terminate(State, {internal_error, timeout, 'No message or data received before timeout.'})
 	end.
-
+%% parse settings from client
 parse(State=#state{socket=Socket, transport=Transport, parse_state={preface, sequence, TRef}}, Data) ->
 	case Data of
 		<< "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", Rest/bits >> ->
@@ -336,7 +336,7 @@ parse(State=#state{socket=Socket, transport=Transport, parse_state={preface, seq
 %% @todo Perhaps instead of just more we can have {more, Len} to avoid all the checks.
 parse(State=#state{local_settings=#{max_frame_size := MaxFrameSize},
 		parse_state=ParseState}, Data) ->
-	case cow_http2:parse(Data, MaxFrameSize) of
+	case cow_http2:parse(Data, MaxFrameSize) of %% parse http2 data
 		{ok, Frame, Rest} ->
 			case ParseState of
 				normal ->

@@ -268,10 +268,10 @@ request_process(Req, Env, Middlewares) ->
 -spec execute(_, _, _) -> _.
 execute(_, _, []) ->
 	ok; %% @todo Maybe error reason should differ here and there.
-execute(Req, Env, [Middleware|Tail]) ->
+execute(Req, Env, [Middleware|Tail]) -> %% loop the middlewares 
 	case Middleware:execute(Req, Env) of
 		{ok, Req2, Env2} ->
-			execute(Req2, Env2, Tail);
+			execute(Req2, Env2, Tail); 
 		{suspend, Module, Function, Args} ->
 			proc_lib:hibernate(?MODULE, resume, [Env, Tail, Module, Function, Args]);
 		{stop, _Req2} ->
