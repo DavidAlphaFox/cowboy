@@ -17,6 +17,10 @@
 -module(cowboy_websocket).
 -behaviour(cowboy_sub_protocol).
 
+-ifdef(OTP_RELEASE).
+-compile({nowarn_deprecated_function, [{erlang, get_stacktrace, 0}]}).
+-endif.
+
 -export([is_upgrade_request/1]).
 -export([upgrade/4]).
 -export([upgrade/5]).
@@ -47,7 +51,7 @@
 	-> call_result(State) when State::any().
 -optional_callbacks([websocket_init/1]).
 
--callback websocket_handle({text | binary | ping | pong, binary()}, State)
+-callback websocket_handle(ping | pong | {text | binary | ping | pong, binary()}, State)
 	-> call_result(State) when State::any().
 -callback websocket_info(any(), State)
 	-> call_result(State) when State::any().

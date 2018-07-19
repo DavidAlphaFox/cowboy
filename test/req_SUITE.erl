@@ -146,6 +146,23 @@ do_decode(Headers, Body) ->
 		_ -> Body
 	end.
 
+do_get_error(Path, Config) ->
+	do_get_error(Path, [], Config).
+
+do_get_error(Path, Headers, Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, Path, [{<<"accept-encoding">>, <<"gzip">>}|Headers]),
+	{response, IsFin, Status, RespHeaders} = gun:await(ConnPid, Ref),
+	Result = case IsFin of
+		nofin -> gun:await_body(ConnPid, Ref);
+		fin -> {ok, <<>>}
+	end,
+	gun:close(ConnPid),
+	case Result of
+		{ok, RespBody} -> {Status, RespHeaders, do_decode(RespHeaders, RespBody)};
+		_ -> Result
+	end.
+
 %% Tests: Request.
 
 binding(Config) ->
@@ -856,9 +873,90 @@ stream_body_nofin(Config) ->
 	{200, _, <<"Hello world!">>} = do_get("/resp/stream_body/nofin", Config),
 	ok.
 
+stream_body_content_length_multiple(Config) ->
+	doc("Streamed body via multiple calls."),
+	{200, _, <<"Hello world!">>} = do_get("/resp/stream_body_content_length/multiple", Config),
+	ok.
+
+stream_body_content_length_fin0(Config) ->
+	doc("Streamed body with last chunk of size 0."),
+	{200, _, <<"Hello world!">>} = do_get("/resp/stream_body_content_length/fin0", Config),
+	ok.
+
+stream_body_content_length_nofin(Config) ->
+	doc("Unfinished streamed body."),
+	{200, _, <<"Hello world!">>} = do_get("/resp/stream_body_content_length/nofin", Config),
+	ok.
+
+stream_body_content_length_nofin_error(Config) ->
+	doc("Not all of body sent."),
+	case config(protocol, Config) of
+		http ->
+			case do_get_error("/resp/stream_body_content_length/nofin-error", Config) of
+				{200, Headers, <<"Hello">>} ->
+					{_, <<"gzip">>} = lists:keyfind(<<"content-encoding">>, 1, Headers);
+				{error, {closed, "The connection was lost."}} ->
+					ok;
+				{error, timeout} ->
+					ok
+			end;
+		http2 ->
+			%% @todo HTTP2 should have the same content-length checks
+			ok
+	end.
+
 %% @todo Crash when calling stream_body after the fin flag has been set.
 %% @todo Crash when calling stream_body after calling reply.
 %% @todo Crash when calling stream_body before calling stream_reply.
+
+stream_events_single(Config) ->
+	doc("Streamed event."),
+	{200, Headers, <<
+		"event: add_comment\n"
+		"data: Comment text.\n"
+		"data: With many lines.\n"
+		"\n"
+	>>} = do_get("/resp/stream_events/single", Config),
+	{_, <<"text/event-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+stream_events_list(Config) ->
+	doc("Streamed list of events."),
+	{200, Headers, <<
+		"event: add_comment\n"
+		"data: Comment text.\n"
+		"data: With many lines.\n"
+		"\n"
+		": Set retry higher\n"
+		": with many lines also.\n"
+		"retry: 10000\n"
+		"\n"
+		"id: 123\n"
+		"event: add_comment\n"
+		"data: Closing!\n"
+		"\n"
+	>>} = do_get("/resp/stream_events/list", Config),
+	{_, <<"text/event-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+stream_events_multiple(Config) ->
+	doc("Streamed events via multiple calls."),
+	{200, Headers, <<
+		"event: add_comment\n"
+		"data: Comment text.\n"
+		"data: With many lines.\n"
+		"\n"
+		": Set retry higher\n"
+		": with many lines also.\n"
+		"retry: 10000\n"
+		"\n"
+		"id: 123\n"
+		"event: add_comment\n"
+		"data: Closing!\n"
+		"\n"
+	>>} = do_get("/resp/stream_events/multiple", Config),
+	{_, <<"text/event-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
 
 stream_trailers(Config) ->
 	doc("Stream body followed by trailer headers."),

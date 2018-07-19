@@ -45,7 +45,9 @@ more efficiently.
 
 The streaming method varies depending on the protocol being
 used. HTTP/2 will use the usual DATA frames. HTTP/1.1 will
-use chunked transfer-encoding. HTTP/1.0 will send the body
+use chunked transfer-encoding, if the content-length
+response header is set the body will be sent without chunked
+chunked transfer-encoding. HTTP/1.0 will send the body
 unmodified and close the connection at the end if no
 content-length was set.
 
@@ -108,5 +110,6 @@ link:man:cowboy_req:set_resp_headers(3)[cowboy_req:set_resp_headers(3)],
 link:man:cowboy_req:inform(3)[cowboy_req:inform(3)],
 link:man:cowboy_req:reply(3)[cowboy_req:reply(3)],
 link:man:cowboy_req:stream_body(3)[cowboy_req:stream_body(3)],
+link:man:cowboy_req:stream_events(3)[cowboy_req:stream_events(3)],
 link:man:cowboy_req:stream_trailers(3)[cowboy_req:stream_trailers(3)],
 link:man:cowboy_req:push(3)[cowboy_req:push(3)]
