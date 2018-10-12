@@ -33,6 +33,7 @@
 	inactivity_timeout => timeout(),
 	initial_connection_window_size => 65535..16#7fffffff,
 	initial_stream_window_size => 0..16#7fffffff,
+	logger => module(),
 	max_concurrent_streams => non_neg_integer() | infinity,
 	max_decode_table_size => non_neg_integer(),
 	max_encode_table_size => non_neg_integer(),
@@ -484,7 +485,10 @@ frame(State0=#state{socket=Socket, transport=Transport, opts=Opts,
 %% Ack for a previously sent SETTINGS frame.
 frame(State0=#state{local_settings=Local0, next_settings=NextSettings,
 		next_settings_timer=TRef}, settings_ack) ->
-	ok = erlang:cancel_timer(TRef, [{async, true}, {info, false}]),
+	ok = case TRef of
+		undefined -> ok;
+		_ -> erlang:cancel_timer(TRef, [{async, true}, {info, false}])
+	end,
 	Local = maps:merge(Local0, NextSettings),
 	State1 = State0#state{local_settings=Local, next_settings=#{},
 		next_settings_timer=undefined},

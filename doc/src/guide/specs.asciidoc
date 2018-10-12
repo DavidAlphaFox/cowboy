@@ -88,10 +88,13 @@ for or related to HTTP.
 * https://tools.ietf.org/html/rfc8246[RFC 8246]: HTTP Immutable Responses
 * https://tools.ietf.org/html/rfc8297[RFC 8297]: An HTTP Status Code for Indicating Hints
 * https://tools.ietf.org/html/rfc8336[RFC 8336]: The ORIGIN HTTP/2 Frame
+* https://tools.ietf.org/html/rfc8441[RFC 8441]: Bootstrapping WebSockets with HTTP/2
+* https://tools.ietf.org/html/rfc8470[RFC 8470]: Using Early Data in HTTP
 * https://www.w3.org/TR/webmention/[Webmention]: Webmention
 
 ==== Upcoming
 
+* https://www.w3.org/TR/clear-site-data/[Clear Site Data]
 * https://www.w3.org/TR/csp-cookies/[Content Security Policy: Cookie Controls]
 * https://www.w3.org/TR/csp-embedded-enforcement/[Content Security Policy: Embedded Enforcement]
 * https://www.w3.org/TR/CSP3/[Content Security Policy Level 3]

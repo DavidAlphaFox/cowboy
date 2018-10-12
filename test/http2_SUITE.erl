@@ -18,6 +18,7 @@
 
 -import(ct_helper, [config/2]).
 -import(ct_helper, [doc/1]).
+-import(ct_helper, [get_remote_pid_tcp/1]).
 -import(ct_helper, [name/0]).
 -import(cowboy_test, [gun_open/1]).
 
@@ -131,10 +132,11 @@ preface_timeout_infinity(Config) ->
 		env => #{dispatch => cowboy_router:compile(init_routes(Config))},
 		preface_timeout => infinity
 	},
-	{ok, Pid} = cowboy:start_clear(name(), [{port, 0}], ProtoOpts),
-	Ref = erlang:monitor(process, Pid),
+	{ok, _} = cowboy:start_clear(name(), [{port, 0}], ProtoOpts),
 	Port = ranch:get_port(name()),
-	{ok, _} = do_handshake([{port, Port}|Config]),
+	{ok, Socket} = do_handshake([{port, Port}|Config]),
+	Pid = get_remote_pid_tcp(Socket),
+	Ref = erlang:monitor(process, Pid),
 	receive
 		{'DOWN', Ref, process, Pid, Reason} ->
 			error(Reason)
@@ -159,3 +161,21 @@ resp_iolist_body(Config) ->
 	{ok, RespBody} = gun:await_body(ConnPid, Ref),
 	Len = iolist_size(RespBody),
 	gun:close(ConnPid).
+
+settings_timeout_infinity(Config) ->
+	doc("Ensure infinity for settings_timeout is accepted."),
+	ProtoOpts = #{
+		env => #{dispatch => cowboy_router:compile(init_routes(Config))},
+		settings_timeout => infinity
+	},
+	{ok, _} = cowboy:start_clear(name(), [{port, 0}], ProtoOpts),
+	Port = ranch:get_port(name()),
+	{ok, Socket} = do_handshake([{port, Port}|Config]),
+	Pid = get_remote_pid_tcp(Socket),
+	Ref = erlang:monitor(process, Pid),
+	receive
+		{'DOWN', Ref, process, Pid, Reason} ->
+			error(Reason)
+	after 1000 ->
+		cowboy:stop_listener(name())
+	end.
