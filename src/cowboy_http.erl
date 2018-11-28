@@ -215,7 +215,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 			sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {State, Buffer});
 		%% Messages pertaining to a stream.
 		{{Pid, StreamID}, Msg} when Pid =:= self() ->
-			loop(info(State, StreamID, Msg), Buffer);
+			loop(info(State, StreamID, Msg), Buffer); %% 处理从stream那发来的消息
 		%% Exit signal from children.
 		Msg = {'EXIT', Pid, _} ->
 			loop(down(State, Pid, Msg), Buffer);
@@ -289,8 +289,8 @@ parse(Buffer, State=#state{in_state=#ps_body{}}) ->
 after_parse({request, Req=#{streamid := StreamID, method := Method,
 		headers := Headers, version := Version},
 		State0=#state{opts=Opts, streams=Streams0}, Buffer}) ->
-	try cowboy_stream:init(StreamID, Req, Opts) of
-		{Commands, StreamState} ->
+	try cowboy_stream:init(StreamID, Req, Opts) of %% 整个请求解析完之后，开始初始化流
+		{Commands, StreamState} -> %% 这个过程中，默认会进行路由解析和请求处理
 			TE = maps:get(<<"te">>, Headers, undefined),
 			Streams = [#stream{id=StreamID, state=StreamState,
 				method=Method, version=Version, te=TE}|Streams0],
@@ -391,7 +391,7 @@ match_eol(<< _, Rest/bits >>, N) ->
 	match_eol(Rest, N + 1);
 match_eol(_, _) ->
 	nomatch.
-
+%% 解析请求方法
 parse_method(_, State, _, 0) ->
 	error_terminate(501, State, {connection_error, limit_reached,
 		'The method name is longer than configuration allows. (RFC7230 3.1.1)'});
@@ -404,7 +404,7 @@ parse_method(<< C, Rest/bits >>, State, SoFar, Remaining) ->
 		_ -> error_terminate(400, State, {connection_error, protocol_error,
 			'The method name must contain only valid token characters. (RFC7230 3.1.1)'})
 	end.
-
+%% 解析路径
 parse_uri(<< H, T, T, P, "://", Rest/bits >>, State, Method)
 		when H =:= $h orelse H =:= $H, T =:= $t orelse T =:= $T;
 			P =:= $p orelse P =:= $P ->
@@ -477,7 +477,7 @@ skip_uri_fragment(<<C, Rest/bits>>, State, M, A, P, Q) ->
 		$\s -> parse_version(Rest, State, M, A, P, Q);
 		_ -> skip_uri_fragment(Rest, State, M, A, P, Q)
 	end.
-
+%% 处理请求版本
 parse_version(<< "HTTP/1.1\r\n", Rest/bits >>, State, M, A, P, Q) ->
 	before_parse_headers(Rest, State, M, A, P, Q, 'HTTP/1.1');
 parse_version(<< "HTTP/1.0\r\n", Rest/bits >>, State, M, A, P, Q) ->
@@ -497,7 +497,7 @@ before_parse_headers(Rest, State, M, A, P, Q, V) ->
 		method=M, authority=A, path=P, qs=Q, version=V}}, #{}).
 
 %% Headers.
-
+%% 开始处理请求头
 %% We need two or more bytes in the buffer to continue.
 parse_header(Rest, State=#state{in_state=PS}, Headers) when byte_size(Rest) < 2 ->
 	{more, State#state{in_state=PS#ps_header{headers=Headers}}, Rest};
@@ -656,7 +656,7 @@ default_port(true) -> 443;
 default_port(_) -> 80.
 
 %% End of request parsing.
-
+%% 整个请求的头部已经被处理完了
 request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock, cert=Cert,
 		in_streamid=StreamID, in_state=
 			PS=#ps_header{method=Method, path=Path, qs=Qs, version=Version}},
@@ -696,7 +696,7 @@ request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock
 	end,
 	Req = #{
 		ref => Ref,
-		pid => self(),
+		pid => self(), %% 当前进程和stream的handler进程是分开的，这样就可以支持http/2的多个stream
 		streamid => StreamID,
 		peer => Peer,
 		sock => Sock,
@@ -825,7 +825,7 @@ parse_body(Buffer, State=#state{in_streamid=StreamID, in_state=
 %% Message handling.
 
 down(State=#state{opts=Opts, children=Children0}, Pid, Msg) ->
-	case cowboy_children:down(Children0, Pid) of
+	case cowboy_children:down(Children0, Pid) of %% 处理stream进程的崩溃
 		%% The stream was terminated already.
 		{ok, undefined, Children} ->
 			State#state{children=Children};
@@ -867,7 +867,7 @@ commands(State, _, []) ->
 %% Supervise a child process.
 commands(State=#state{children=Children}, StreamID, [{spawn, Pid, Shutdown}|Tail]) ->
 	commands(State#state{children=cowboy_children:up(Children, Pid, StreamID, Shutdown)},
-		StreamID, Tail);
+		StreamID, Tail); %% 一个新的子进程加入
 %% Error handling.
 commands(State, StreamID, [Error = {internal_error, _, _}|Tail]) ->
 	commands(stream_reset(State, StreamID, Error), StreamID, Tail);

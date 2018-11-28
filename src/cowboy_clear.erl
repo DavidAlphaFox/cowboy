@@ -32,6 +32,6 @@ connection_process(Parent, Ref, Socket, Transport, Opts) ->
 init(Parent, Ref, Socket, Transport, Opts, Protocol) ->
 	_ = case maps:get(connection_type, Opts, supervisor) of
 		worker -> ok;
-		supervisor -> process_flag(trap_exit, true)
+		supervisor -> process_flag(trap_exit, true) %% 进程默认处理退出事件
 	end,
 	Protocol:init(Parent, Ref, Socket, Transport, Opts).

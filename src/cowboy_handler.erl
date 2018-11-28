@@ -39,10 +39,10 @@
 	when Req::cowboy_req:req(), Env::cowboy_middleware:env().
 execute(Req, Env=#{handler := Handler, handler_opts := HandlerOpts}) ->
 	try Handler:init(Req, HandlerOpts) of
-		{ok, Req2, State} ->
+		{ok, Req2, State} -> %% 请求结束了
 			Result = terminate(normal, Req2, State, Handler),
 			{ok, Req2, Env#{result => Result}};
-		{Mod, Req2, State} ->
+		{Mod, Req2, State} -> %%  请求需要升级
 			Mod:upgrade(Req2, Env, Handler, State);
 		{Mod, Req2, State, Opts} ->
 			Mod:upgrade(Req2, Env, Handler, State, Opts)
