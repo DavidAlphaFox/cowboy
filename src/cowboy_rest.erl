@@ -276,10 +276,10 @@ upgrade(Req0, Env, Handler, HandlerState0) ->
 %% cowboy_rest takes no options.
 upgrade(Req, Env, Handler, HandlerState, _Opts) ->
 	upgrade(Req, Env, Handler, HandlerState).
-
+%% step 1: 检测服务存在
 service_available(Req, State) ->
 	expect(Req, State, service_available, true, fun known_methods/2, 503).
-
+%% step 2: 检测请求方法
 %% known_methods/2 should return a list of binary methods.
 known_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, known_methods) of
@@ -301,10 +301,10 @@ known_methods(Req, State=#state{method=Method}) ->
 				false -> next(Req2, State2, 501)
 			end
 	end.
-
+%% step 3: 检测uri长度是否超长
 uri_too_long(Req, State) ->
 	expect(Req, State, uri_too_long, false, fun allowed_methods/2, 414).
-
+%% step 4: 检测准许使用方法
 %% allowed_methods/2 should return a list of binary methods.
 allowed_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, allowed_methods) of
@@ -341,10 +341,10 @@ method_not_allowed(Req, State, Methods) ->
 	<< ", ", Allow/binary >> = << << ", ", M/binary >> || M <- Methods >>,
 	Req2 = cowboy_req:set_resp_header(<<"allow">>, Allow, Req),
 	respond(Req2, State, 405).
-
+%% step 5: 请求是否异常
 malformed_request(Req, State) ->
 	expect(Req, State, malformed_request, false, fun is_authorized/2, 400).
-
+%% step 6: 检测是否是验证的
 %% is_authorized/2 should return true or {false, WwwAuthenticateHeader}.
 is_authorized(Req, State) ->
 	case call(Req, State, is_authorized) of
@@ -361,17 +361,17 @@ is_authorized(Req, State) ->
 				<<"www-authenticate">>, AuthHead, Req2),
 			respond(Req3, State#state{handler_state=HandlerState}, 401)
 	end.
-
+%% step 7: 检查是否被禁止访问资源
 forbidden(Req, State) ->
 	expect(Req, State, forbidden, false, fun valid_content_headers/2, 403).
-
+%% step 8: 检查headers是否合法
 valid_content_headers(Req, State) ->
 	expect(Req, State, valid_content_headers, true,
 		fun valid_entity_length/2, 501).
-
+%% step 9: 检查实体的长度
 valid_entity_length(Req, State) ->
 	expect(Req, State, valid_entity_length, true, fun options/2, 413).
-
+%% step 10: 处理options的响应
 %% If you need to add additional headers to the response at this point,
 %% you should do it directly in the options/2 call using set_resp_headers.
 options(Req, State=#state{allowed_methods=Methods, method= <<"OPTIONS">>}) ->
@@ -393,7 +393,7 @@ options(Req, State=#state{allowed_methods=Methods, method= <<"OPTIONS">>}) ->
 	end;
 options(Req, State) ->
 	content_types_provided(Req, State).
-
+%% step 11: 检查相应content types的处理函数
 %% content_types_provided/2 should return a list of content types and their
 %% associated callback function as a tuple: {{Type, SubType, Params}, Fun}.
 %% Type and SubType are the media type as binary. Params is a list of
@@ -519,7 +519,7 @@ match_media_type_params(Req, State, Accept,
 		false ->
 			match_media_type(Req, State, Accept, Tail, MediaType)
 	end.
-
+%% step 11.1: 资源处理时，返回资源语言类型
 %% languages_provided should return a list of binary values indicating
 %% which languages are accepted by the resource.
 %%
@@ -528,7 +528,7 @@ match_media_type_params(Req, State, Accept,
 languages_provided(Req, State) ->
 	case call(Req, State, languages_provided) of
 		no_call ->
-			charsets_provided(Req, State);
+			charsets_provided(Req, State); %% 没有语言的回调，检查字符类型
 		{stop, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
 		{Switch, Req2, HandlerState} when element(1, Switch) =:= switch_handler ->
@@ -538,7 +538,7 @@ languages_provided(Req, State) ->
 		{LP, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState, languages_p=LP},
 			case cowboy_req:parse_header(<<"accept-language">>, Req2) of
-				undefined ->
+				undefined -> %% 客户端请求没有accept-language，就将返回列表中的第一个语言作为默认值
 					set_language(Req2, State2#state{language_a=hd(LP)});
 				AcceptLanguage ->
 					AcceptLanguage2 = prioritize_languages(AcceptLanguage),
@@ -580,17 +580,17 @@ match_language(Req, State, Accept, [Provided|Tail],
 		_Any ->
 			match_language(Req, State, Accept, Tail, Language)
 	end.
-
+%% step 12: 设置语言
 set_language(Req, State=#state{language_a=Language}) ->
 	Req2 = cowboy_req:set_resp_header(<<"content-language">>, Language, Req),
 	charsets_provided(Req2#{language => Language}, State).
-
+%% step 13: 设字符集
 %% charsets_provided should return a list of binary values indicating
 %% which charsets are accepted by the resource.
 charsets_provided(Req, State) ->
 	case call(Req, State, charsets_provided) of
 		no_call ->
-			set_content_type(Req, State);
+			set_content_type(Req, State); %% 没有回调的时候就使用默认的处理方式,从请求的accept-charset中取出来
 		{stop, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
 		{Switch, Req2, HandlerState} when element(1, Switch) =:= switch_handler ->
@@ -639,7 +639,7 @@ match_charset(Req, State, _Accept, [Provided|_], {Provided, _}) ->
 	set_content_type(Req, State#state{charset_a=Provided});
 match_charset(Req, State, Accept, [_|Tail], Charset) ->
 	match_charset(Req, State, Accept, Tail, Charset).
-
+%% step 13.1 设置content-type
 set_content_type(Req, State=#state{
 		content_type_a={{Type, SubType, Params}, _Fun},
 		charset_a=Charset}) ->
@@ -666,7 +666,7 @@ set_content_type_build_params([{Attr, Value}|Tail], Acc) ->
 %% and the found encoding is something other than identity.
 encodings_provided(Req, State) ->
 	variances(Req, State).
-
+%% step 11.2 不知道该如何相应的时候就跳转到此处
 not_acceptable(Req, State) ->
 	respond(Req, State, 406).
 
@@ -716,11 +716,11 @@ variances(Req, State, Variances) ->
 			{Variances ++ HandlerVariances, Req2,
 				State#state{handler_state=HandlerState}}
 	end.
-
+%% step 14: 检查资源是否存在
 resource_exists(Req, State) ->
 	expect(Req, State, resource_exists, true,
 		fun if_match_exists/2, fun if_match_must_not_exist/2).
-
+%% step 14.1 资源存在
 if_match_exists(Req, State) ->
 	State2 = State#state{exists=true},
 	case cowboy_req:parse_header(<<"if-match">>, Req) of
@@ -733,7 +733,7 @@ if_match_exists(Req, State) ->
 	end.
 
 if_match(Req, State, EtagsList) ->
-	try generate_etag(Req, State) of
+	try generate_etag(Req, State) of %% 尝试让资源模块生成etag
 		%% Strong Etag comparison: weak Etag never matches.
 		{{weak, _}, Req2, State2} ->
 			precondition_failed(Req2, State2);
@@ -746,7 +746,7 @@ if_match(Req, State, EtagsList) ->
 	catch Class:Reason ->
 		error_terminate(Req, State, Class, Reason)
 	end.
-
+%% step 14.2 资源不存在
 if_match_must_not_exist(Req, State) ->
 	case cowboy_req:header(<<"if-match">>, Req) of
 		undefined -> is_put_to_missing_resource(Req, State);
@@ -860,12 +860,12 @@ not_modified(Req, State) ->
 
 precondition_failed(Req, State) ->
 	respond(Req, State, 412).
-
+%% step 14.2.1
 is_put_to_missing_resource(Req, State=#state{method= <<"PUT">>}) ->
 	moved_permanently(Req, State, fun is_conflict/2);
-is_put_to_missing_resource(Req, State) ->
+is_put_to_missing_resource(Req, State) -> %% 非put请求
 	previously_existed(Req, State).
-
+%% step 14.2.2 检查资源是否已经被永久性的移动走了
 %% moved_permanently/2 should return either false or {true, Location}
 %% with Location the full new URI of the resource.
 moved_permanently(Req, State, OnFalse) ->
@@ -874,7 +874,7 @@ moved_permanently(Req, State, OnFalse) ->
 			Req3 = cowboy_req:set_resp_header(
 				<<"location">>, Location, Req2),
 			respond(Req3, State#state{handler_state=HandlerState}, 301);
-		{false, Req2, HandlerState} ->
+		{false, Req2, HandlerState} -> %% 没有被移动走，直接检查是否有冲突
 			OnFalse(Req2, State#state{handler_state=HandlerState});
 		{stop, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
@@ -883,12 +883,12 @@ moved_permanently(Req, State, OnFalse) ->
 		no_call ->
 			OnFalse(Req, State)
 	end.
-
+%% step 14.2.4 以前是否存在该资源
 previously_existed(Req, State) ->
 	expect(Req, State, previously_existed, false,
 		fun (R, S) -> is_post_to_missing_resource(R, S, 404) end,
 		fun (R, S) -> moved_permanently(R, S, fun moved_temporarily/2) end).
-
+%% step 14.2.6 检查是否暂时性的被移走了
 %% moved_temporarily/2 should return either false or {true, Location}
 %% with Location the full new URI of the resource.
 moved_temporarily(Req, State) ->
@@ -906,7 +906,7 @@ moved_temporarily(Req, State) ->
 		no_call ->
 			is_post_to_missing_resource(Req, State, 410)
 	end.
-
+%% step 14.2.5  以前不存在的资源，检查是否是POST请求，看是否准寻POST创建资源
 is_post_to_missing_resource(Req, State=#state{method= <<"POST">>}, OnFalse) ->
 	allow_missing_post(Req, State, OnFalse);
 is_post_to_missing_resource(Req, State, OnFalse) ->
@@ -914,7 +914,7 @@ is_post_to_missing_resource(Req, State, OnFalse) ->
 
 allow_missing_post(Req, State, OnFalse) ->
 	expect(Req, State, allow_missing_post, true, fun accept_resource/2, OnFalse).
-
+%% step 15: 进入相应的方法进行处理
 method(Req, State=#state{method= <<"DELETE">>}) ->
 	delete_resource(Req, State);
 method(Req, State=#state{method= <<"PUT">>}) ->
@@ -935,10 +935,10 @@ delete_resource(Req, State) ->
 %% delete_completed/2 indicates whether the resource has been deleted yet.
 delete_completed(Req, State) ->
 	expect(Req, State, delete_completed, true, fun has_resp_body/2, 202).
-
+%% step 14.2.3 资源是否冲突
 is_conflict(Req, State) ->
 	expect(Req, State, is_conflict, false, fun accept_resource/2, 409).
-
+%% step 14.5 资源是否被接受
 %% content_types_accepted should return a list of media types and their
 %% associated callback functions in the same format as content_types_provided.
 %%
@@ -1065,7 +1065,7 @@ set_resp_body_expires(Req, State) ->
 	catch Class:Reason ->
 		error_terminate(Req, State, Class, Reason)
 	end.
-
+%% step 16: 产生get请求的body
 %% Set the response headers and call the callback found using
 %% content_types_provided/2 to obtain the request body and add
 %% it to the response.
@@ -1136,7 +1136,7 @@ generate_etag(Req, State=#state{etag=undefined}) ->
 	end;
 generate_etag(Req, State=#state{etag=Etag}) ->
 	{Etag, Req, State}.
-
+%% step 15 检查资源是否发生了变化
 last_modified(Req, State=#state{last_modified=no_call}) ->
 	{undefined, Req, State};
 last_modified(Req, State=#state{last_modified=undefined}) ->
