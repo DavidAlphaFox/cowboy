@@ -985,7 +985,7 @@ choose_content_type(Req, State, {Type, SubType, Param},
 	process_content_type(Req, State, Fun);
 choose_content_type(Req, State, ContentType, [_Any|Tail]) ->
 	choose_content_type(Req, State, ContentType, Tail).
-
+%% 处理 put和post的请求
 process_content_type(Req, State=#state{method=Method, exists=Exists}, Fun) ->
 	try case call(Req, State, Fun) of
 		{stop, Req2, HandlerState2} ->
