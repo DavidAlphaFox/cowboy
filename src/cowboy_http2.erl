@@ -125,7 +125,7 @@ init(Parent, Ref, Socket, Transport, ProxyHeader, Opts) ->
 	{inet:ip_address(), inet:port_number()}, {inet:ip_address(), inet:port_number()},
 	binary() | undefined, binary()) -> ok.
 init(Parent, Ref, Socket, Transport, ProxyHeader, Opts, Peer, Sock, Cert, Buffer) ->
-	{ok, Preface, HTTP2Machine} = cow_http2_machine:init(server, Opts),
+	{ok, Preface, HTTP2Machine} = cow_http2_machine:init(server, Opts), %%创建http2的状态机器
 	State = set_timeout(#state{parent=Parent, ref=Ref, socket=Socket,
 		transport=Transport, proxy_header=ProxyHeader,
 		opts=Opts, peer=Peer, sock=Sock, cert=Cert,
@@ -145,7 +145,7 @@ init(Parent, Ref, Socket, Transport, ProxyHeader, Opts, Peer, Sock, Cert, Buffer
 		_Settings, Req=#{method := Method}) ->
 	{ok, Preface, HTTP2Machine0} = cow_http2_machine:init(server, Opts),
 	{ok, StreamID, HTTP2Machine}
-		= cow_http2_machine:init_upgrade_stream(Method, HTTP2Machine0),
+		= cow_http2_machine:init_upgrade_stream(Method, HTTP2Machine0), %% 初始升级流
 	State0 = #state{parent=Parent, ref=Ref, socket=Socket,
 		transport=Transport, proxy_header=ProxyHeader,
 		opts=Opts, peer=Peer, sock=Sock, cert=Cert,
@@ -164,7 +164,7 @@ init(Parent, Ref, Socket, Transport, ProxyHeader, Opts, Peer, Sock, Cert, Buffer
 		<<>> -> loop(State, Buffer);
 		_ -> parse(State, Buffer)
 	end.
-
+%% upgrade 后使用此处的loop进行接管
 loop(State=#state{parent=Parent, socket=Socket, transport=Transport,
 		opts=Opts, timer=TimerRef, children=Children}, Buffer) ->
 	%% @todo This should only be called when data was read.
@@ -185,7 +185,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport,
 		{system, From, Request} ->
 			sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {State, Buffer});
 		%% Timeouts.
-		{timeout, TimerRef, idle_timeout} ->
+ 		{timeout, TimerRef, idle_timeout} ->
 			terminate(State, {stop, timeout,
 				'Connection idle longer than configuration allows.'});
 		{timeout, Ref, {shutdown, Pid}} ->
@@ -383,7 +383,7 @@ headers_to_map([{Name, Value}|Tail], Acc0) ->
 			Acc0#{Name => Value}
 	end,
 	headers_to_map(Tail, Acc).
-
+%% 创建流，进行处理，stream并不是乱序处理，而是顺序的进行处理
 headers_frame(State=#state{opts=Opts, streams=Streams}, StreamID, Req) ->
 	try cowboy_stream:init(StreamID, Req, Opts) of
 		{Commands, StreamState} ->

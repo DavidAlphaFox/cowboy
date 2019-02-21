@@ -96,7 +96,7 @@
 %%
 %% Note that a failure in init/3 will result in terminate/3
 %% NOT being called. This is because the state is not available.
-
+%% y是哦那个handler进行处理
 -spec init(streamid(), cowboy_req:req(), cowboy:opts())
 	-> {commands(), {module(), state()} | undefined}.
 init(StreamID, Req, Opts) ->
