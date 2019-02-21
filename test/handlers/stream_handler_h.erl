@@ -34,6 +34,12 @@ init_commands(_, _, #state{test=crash_in_terminate}) ->
 	[{response, 200, #{<<"content-length">> => <<"12">>}, <<"Hello world!">>}, stop];
 init_commands(_, _, #state{test=crash_in_early_error}) ->
 	error(crash);
+init_commands(_, _, #state{test=set_options_ignore_unknown}) ->
+	[
+		{set_options, #{unknown_options => true}},
+		{response, 200, #{<<"content-length">> => <<"12">>}, <<"Hello world!">>},
+		stop
+	];
 init_commands(_, _, State=#state{test=shutdown_on_stream_stop}) ->
 	Spawn = init_process(false, State),
 	[{headers, 200, #{}}, {spawn, Spawn, 5000}, stop];
@@ -107,6 +113,7 @@ early_error(StreamID, Reason, PartialReq, Resp, Opts) ->
 	end.
 
 %% @todo It would be good if we could allow this function to return normally.
+-spec takeover(_, _, _, _, _, _, _) -> no_return().
 takeover(Parent, Ref, Socket, Transport, Opts, Buffer, State=#state{pid=Pid}) ->
 	Pid ! {Pid, self(), takeover, Parent, Ref, Socket, Transport, Opts, Buffer, State},
 	exit(normal).

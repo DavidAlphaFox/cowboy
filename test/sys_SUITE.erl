@@ -21,6 +21,7 @@
 -import(ct_helper, [get_parent_pid/1]).
 -import(ct_helper, [get_remote_pid_tcp/1]).
 -import(ct_helper, [get_remote_pid_tls/1]).
+-import(ct_helper, [is_process_down/1]).
 -import(cowboy_test, [gun_open/1]).
 
 all() ->
@@ -30,10 +31,9 @@ groups() ->
 	[{sys, [parallel], ct_helper:all(?MODULE)}].
 
 init_per_suite(Config) ->
-	ct:print("This test suite will produce error reports about "
-		"EXIT signals for unknown processes."),
 	ProtoOpts = #{
-		env => #{dispatch => init_dispatch(Config)}
+		env => #{dispatch => init_dispatch(Config)},
+		logger => ?MODULE
 	},
 	%% Clear listener.
 	{ok, _} = cowboy:start_clear(clear, [{port, 0}], ProtoOpts),
@@ -59,6 +59,16 @@ init_dispatch(_) ->
 		{"/loop", long_polling_sys_h, []},
 		{"/ws", ws_echo, []}
 	]}]).
+
+%% Logger function silencing the expected warnings.
+
+error(Format, Args) ->
+	error_logger:error_msg(Format, Args).
+
+warning("Received EXIT signal " ++ _, [{'EXIT', _, {shutdown, ?MODULE}}|_]) ->
+	ok;
+warning(Format, Args) ->
+	error_logger:warning_msg(Format, Args).
 
 %% proc_lib.
 
@@ -317,9 +327,9 @@ trap_exit_parent_exit_h1(Config) ->
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
 	Parent = get_parent_pid(Pid),
-	Pid ! {'EXIT', Parent, shutdown},
+	Pid ! {'EXIT', Parent, {shutdown, ?MODULE}},
 	{error, closed} = gen_tcp:recv(Socket, 0, 1000),
-	false = is_process_alive(Pid),
+	true = is_process_down(Pid),
 	ok.
 
 trap_exit_parent_exit_h2(Config) ->
@@ -332,9 +342,9 @@ trap_exit_parent_exit_h2(Config) ->
 	timer:sleep(100),
 	Pid = get_remote_pid_tls(Socket),
 	Parent = get_parent_pid(Pid),
-	Pid ! {'EXIT', Parent, shutdown},
+	Pid ! {'EXIT', Parent, {shutdown, ?MODULE}},
 	{error, closed} = ssl:recv(Socket, 0, 1000),
-	false = is_process_alive(Pid),
+	true = is_process_down(Pid),
 	ok.
 
 trap_exit_parent_exit_ws(Config) ->
@@ -356,9 +366,9 @@ trap_exit_parent_exit_ws(Config) ->
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
 	Parent = get_parent_pid(Pid),
-	Pid ! {'EXIT', Parent, shutdown},
+	Pid ! {'EXIT', Parent, {shutdown, ?MODULE}},
 	{error, closed} = gen_tcp:recv(Socket, 0, 1000),
-	false = is_process_alive(Pid),
+	true = is_process_down(Pid),
 	ok.
 
 trap_exit_parent_exit_loop(Config) ->
@@ -372,10 +382,10 @@ trap_exit_parent_exit_loop(Config) ->
 	timer:sleep(100),
 	Parent = get_remote_pid_tcp(Socket),
 	[{_, Pid, _, _}] = supervisor:which_children(Parent),
-	Pid ! {'EXIT', Parent, shutdown},
+	Pid ! {'EXIT', Parent, {shutdown, ?MODULE}},
 	%% We exit normally but didn't send a response.
 	{ok, "HTTP/1.1 204 "} = gen_tcp:recv(Socket, 13, 1000),
-	false = is_process_alive(Pid),
+	true = is_process_down(Pid),
 	ok.
 
 trap_exit_other_exit_h1(Config) ->
@@ -385,7 +395,7 @@ trap_exit_other_exit_h1(Config) ->
 		[{active, false}]),
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
-	Pid ! {'EXIT', self(), shutdown},
+	Pid ! {'EXIT', self(), {shutdown, ?MODULE}},
 	ok = gen_tcp:send(Socket,
 		"GET / HTTP/1.1\r\n"
 		"Host: localhost\r\n"
@@ -406,7 +416,7 @@ trap_exit_other_exit_h2(Config) ->
 	{ok, << 0:24, 4:8, 1:8, 0:32 >>} = ssl:recv(Socket, 9, 1000),
 	timer:sleep(100),
 	Pid = get_remote_pid_tls(Socket),
-	Pid ! {'EXIT', self(), shutdown},
+	Pid ! {'EXIT', self(), {shutdown, ?MODULE}},
 	%% Send a HEADERS frame as a request.
 	{HeadersBlock, _} = cow_hpack:encode([
 		{<<":method">>, <<"GET">>},
@@ -438,7 +448,7 @@ trap_exit_other_exit_ws(Config) ->
 	{ok, {http_response, {1, 1}, 101, _}, _} = erlang:decode_packet(http, Handshake, []),
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
-	Pid ! {'EXIT', self(), shutdown},
+	Pid ! {'EXIT', self(), {shutdown, ?MODULE}},
 	%% The process stays alive.
 	{error, timeout} = gen_tcp:recv(Socket, 0, 1000),
 	true = is_process_alive(Pid),
@@ -455,7 +465,7 @@ trap_exit_other_exit_loop(Config) ->
 	timer:sleep(100),
 	Parent = get_remote_pid_tcp(Socket),
 	[{_, Pid, _, _}] = supervisor:which_children(Parent),
-	Pid ! {'EXIT', self(), shutdown},
+	Pid ! {'EXIT', self(), {shutdown, ?MODULE}},
 	%% The process stays alive.
 	{ok, "HTTP/1.1 299 "} = gen_tcp:recv(Socket, 13, 1000),
 	true = is_process_alive(Pid),
@@ -884,28 +894,28 @@ sys_suspend_and_resume_loop(Config) ->
 %% The callback Module:system_terminate/4 is used in all cases.
 
 sys_terminate_h1(Config) ->
-	doc("h1: The sys:terminate/1 function works as expected."),
+	doc("h1: The sys:terminate/2,3 function works as expected."),
 	{ok, Socket} = gen_tcp:connect("localhost", config(clear_port, Config), [{active, false}]),
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
-	ok = sys:terminate(Pid, {shutdown, test}),
+	ok = sys:terminate(Pid, {shutdown, ?MODULE}),
 	{error, closed} = gen_tcp:recv(Socket, 0, 500),
 	ok.
 
 sys_terminate_h2(Config) ->
-	doc("h2: The sys:terminate/1 function works as expected."),
+	doc("h2: The sys:terminate/2,3 function works as expected."),
 	{ok, Socket} = ssl:connect("localhost", config(tls_port, Config),
 		[{active, false}, binary, {alpn_advertised_protocols, [<<"h2">>]}]),
 	%% Skip the SETTINGS frame.
 	{ok, <<_,_,_,4,_/bits>>} = ssl:recv(Socket, 0, 1000),
 	timer:sleep(100),
 	Pid = get_remote_pid_tls(Socket),
-	ok = sys:terminate(Pid, {shutdown, test}),
+	ok = sys:terminate(Pid, {shutdown, ?MODULE}),
 	{error, closed} = ssl:recv(Socket, 0, 500),
 	ok.
 
 sys_terminate_ws(Config) ->
-	doc("ws: The sys:terminate/1 function works as expected."),
+	doc("ws: The sys:terminate/2,3 function works as expected."),
 	{ok, Socket} = gen_tcp:connect("localhost", config(clear_port, Config),
 		[binary, {active, false}]),
 	ok = gen_tcp:send(Socket,
@@ -921,12 +931,12 @@ sys_terminate_ws(Config) ->
 	{ok, {http_response, {1, 1}, 101, _}, _} = erlang:decode_packet(http, Handshake, []),
 	timer:sleep(100),
 	Pid = get_remote_pid_tcp(Socket),
-	ok = sys:terminate(Pid, {shutdown, test}),
+	ok = sys:terminate(Pid, {shutdown, ?MODULE}),
 	{error, closed} = gen_tcp:recv(Socket, 0, 500),
 	ok.
 
 sys_terminate_loop(Config) ->
-	doc("loop: The sys:terminate/1 function works as expected."),
+	doc("loop: The sys:terminate/2,3 function works as expected."),
 	{ok, Socket} = gen_tcp:connect("localhost", config(clear_port, Config), [{active, false}]),
 	ok = gen_tcp:send(Socket,
 		"GET /loop HTTP/1.1\r\n"
@@ -936,7 +946,7 @@ sys_terminate_loop(Config) ->
 	SupPid = get_remote_pid_tcp(Socket),
 	[{_, Pid, _, _}] = supervisor:which_children(SupPid),
 	%% We stop the process normally and therefore get a 204.
-	ok = sys:terminate(Pid, {shutdown, test}),
+	ok = sys:terminate(Pid, {shutdown, ?MODULE}),
 	{ok, "HTTP/1.1 204 "} = gen_tcp:recv(Socket, 13, 500),
 	ok.
 

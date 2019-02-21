@@ -18,15 +18,19 @@
 -compile({nowarn_deprecated_function, [{erlang, get_stacktrace, 0}]}).
 -endif.
 
--export([init/5]).
+-export([init/6]).
 
 -export([system_continue/3]).
 -export([system_terminate/4]).
 -export([system_code_change/4]).
 
 -type opts() :: #{
+	chunked => boolean(),
+	compress_buffering => boolean(),
+	compress_threshold => non_neg_integer(),
 	connection_type => worker | supervisor,
 	env => cowboy_middleware:env(),
+	http10_keepalive => boolean(),
 	idle_timeout => timeout(),
 	inactivity_timeout => timeout(),
 	linger_timeout => timeout(),
@@ -39,10 +43,17 @@
 	max_keepalive => non_neg_integer(),
 	max_method_length => non_neg_integer(),
 	max_request_line_length => non_neg_integer(),
+	metrics_callback => cowboy_metrics_h:metrics_callback(),
 	middlewares => [module()],
+	proxy_header => boolean(),
 	request_timeout => timeout(),
+	sendfile => boolean(),
 	shutdown_timeout => timeout(),
-	stream_handlers => [module()]
+	stream_handlers => [module()],
+	tracer_callback => cowboy_tracer_h:tracer_callback(),
+	tracer_match_specs => cowboy_tracer_h:tracer_match_specs(),
+	%% Open ended because configured stream handlers might add options.
+	_ => _
 }.
 -export_type([opts/0]).
 
@@ -56,7 +67,7 @@
 	path = undefined :: binary(),
 	qs = undefined :: binary(),
 	version = undefined :: cowboy:http_version(),
-	headers = undefined :: map() | undefined, %% @todo better type than map()
+	headers = undefined :: cowboy:http_headers() | undefined,
 	name = undefined :: binary() | undefined
 }).
 
@@ -98,7 +109,11 @@
 	ref :: ranch:ref(),
 	socket :: inet:socket(),
 	transport :: module(),
-	opts = #{} :: map(),
+	proxy_header :: undefined | ranch_proxy_header:proxy_info(),
+	opts = #{} :: cowboy:opts(),
+
+	%% Some options may be overriden for the current stream.
+	overriden_opts = #{} :: cowboy:opts(),
 
 	%% Remote address and port for the connection.
 	peer = undefined :: {inet:ip_address(), inet:port_number()},
@@ -136,11 +151,12 @@
 
 -include_lib("cowlib/include/cow_inline.hrl").
 -include_lib("cowlib/include/cow_parse.hrl").
-% init protocol
--spec init(pid(), ranch:ref(), inet:socket(), module(), cowboy:opts()) -> ok.
-init(Parent, Ref, Socket, Transport, Opts) ->
-	Peer0 = Transport:peername(Socket), % get remote address and port 
-	Sock0 = Transport:sockname(Socket), % get local address and port
+
+-spec init(pid(), ranch:ref(), inet:socket(), module(),
+	ranch_proxy_header:proxy_info(), cowboy:opts()) -> ok.
+init(Parent, Ref, Socket, Transport, ProxyHeader, Opts) ->
+	Peer0 = Transport:peername(Socket),
+	Sock0 = Transport:sockname(Socket),
 	Cert1 = case Transport:name() of
 		ssl ->
 			case ssl:peercert(Socket) of
@@ -157,7 +173,7 @@ init(Parent, Ref, Socket, Transport, Opts) ->
 			LastStreamID = maps:get(max_keepalive, Opts, 100), % set default last_streamid from configuration
 			before_loop(set_timeout(#state{
 				parent=Parent, ref=Ref, socket=Socket,
-				transport=Transport, opts=Opts,
+				transport=Transport, proxy_header=ProxyHeader, opts=Opts,
 				peer=Peer, sock=Sock, cert=Cert,
 				last_streamid=LastStreamID}), <<>>);
 		{{error, Reason}, _, _} ->
@@ -209,8 +225,7 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 			loop(State, Buffer);
 		%% System messages.
 		{'EXIT', Parent, Reason} ->
-			%% @todo We should exit gracefully, if possible.
-			exit(Reason);
+			terminate(State, {stop, {exit, Reason}, 'Parent process terminated.'});
 		{system, From, Request} ->
 			sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {State, Buffer});
 		%% Messages pertaining to a stream.
@@ -233,13 +248,18 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 
 %% We set request_timeout when there are no active streams,
 %% and idle_timeout otherwise.
-set_timeout(State0=#state{opts=Opts, streams=Streams}) ->
+set_timeout(State0=#state{opts=Opts, overriden_opts=Override, streams=Streams}) ->
 	State = cancel_timeout(State0),
 	{Name, Default} = case Streams of
 		[] -> {request_timeout, 5000};
 		_ -> {idle_timeout, 60000}
 	end,
-	TimerRef = case maps:get(Name, Opts, Default) of
+	Timeout = case Override of
+		%% The timeout may have been overriden for the current stream.
+		#{Name := Timeout0} -> Timeout0;
+		_ -> maps:get(Name, Opts, Default)
+	end,
+	TimerRef = case Timeout of
 		infinity -> undefined;
 		Timeout -> erlang:start_timer(Timeout, self(), Name)
 	end,
@@ -658,7 +678,7 @@ default_port(_) -> 80.
 %% End of request parsing.
 %% 整个请求的头部已经被处理完了
 request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock, cert=Cert,
-		in_streamid=StreamID, in_state=
+		proxy_header=ProxyHeader, in_streamid=StreamID, in_state=
 			PS=#ps_header{method=Method, path=Path, qs=Qs, version=Version}},
 		Headers0, Host, Port) ->
 	Scheme = case Transport:secure() of
@@ -694,7 +714,7 @@ request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock
 		_ ->
 			{Headers0, false, 0, undefined, undefined}
 	end,
-	Req = #{
+	Req0 = #{
 		ref => Ref,
 		pid => self(), %% 当前进程和stream的handler进程是分开的，这样就可以支持http/2的多个stream
 		streamid => StreamID,
@@ -714,6 +734,11 @@ request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock
 		has_body => HasBody,
 		body_length => BodyLength
 	},
+	%% We add the PROXY header information if any.
+	Req = case ProxyHeader of
+		undefined -> Req0;
+		_ -> Req0#{proxy_header => ProxyHeader}
+	end,
 	case is_http2_upgrade(Headers, Version) of
 		false ->
 			State = case HasBody of
@@ -757,12 +782,12 @@ is_http2_upgrade(_, _) ->
 %% use PRI method direct upgrade 
 %% Prior knowledge upgrade, without an HTTP/1.1 request.
 http2_upgrade(State=#state{parent=Parent, ref=Ref, socket=Socket, transport=Transport,
-		opts=Opts, peer=Peer, sock=Sock, cert=Cert}, Buffer) ->
+		proxy_header=ProxyHeader, opts=Opts, peer=Peer, sock=Sock, cert=Cert}, Buffer) ->
 	case Transport:secure() of
 		false ->
 			_ = cancel_timeout(State),
-			cowboy_http2:init(Parent, Ref, Socket, Transport, Opts,
-				Peer, Sock, Cert, Buffer);
+			cowboy_http2:init(Parent, Ref, Socket, Transport,
+				ProxyHeader, Opts, Peer, Sock, Cert, Buffer);
 		true ->
 			error_terminate(400, State, {connection_error, protocol_error,
 				'Clients that support HTTP/2 over TLS MUST use ALPN. (RFC7540 3.4)'})
@@ -770,7 +795,8 @@ http2_upgrade(State=#state{parent=Parent, ref=Ref, socket=Socket, transport=Tran
 
 %% Upgrade via an HTTP/1.1 request.
 http2_upgrade(State=#state{parent=Parent, ref=Ref, socket=Socket, transport=Transport,
-		opts=Opts, peer=Peer, sock=Sock, cert=Cert}, Buffer, HTTP2Settings, Req) ->
+		proxy_header=ProxyHeader, opts=Opts, peer=Peer, sock=Sock, cert=Cert},
+		Buffer, HTTP2Settings, Req) ->
 	%% @todo
 	%% However if the client sent a body, we need to read the body in full
 	%% and if we can't do that, return a 413 response. Some options are in order.
@@ -778,8 +804,8 @@ http2_upgrade(State=#state{parent=Parent, ref=Ref, socket=Socket, transport=Tran
 	try cow_http_hd:parse_http2_settings(HTTP2Settings) of
 		Settings ->
 			_ = cancel_timeout(State),
-			cowboy_http2:init(Parent, Ref, Socket, Transport, Opts,
-				Peer, Sock, Cert, Buffer, Settings, Req)
+			cowboy_http2:init(Parent, Ref, Socket, Transport,
+				ProxyHeader, Opts, Peer, Sock, Cert, Buffer, Settings, Req)
 	catch _:_ ->
 		error_terminate(400, State, {connection_error, protocol_error,
 			'The HTTP2-Settings header must contain a base64 SETTINGS payload. (RFC7540 3.2, RFC7540 3.2.1)'})
@@ -890,7 +916,8 @@ commands(State, StreamID, [{flow, _Length}|Tail]) ->
 
 	commands(State, StreamID, Tail);
 %% Error responses are sent only if a response wasn't sent already.
-commands(State=#state{out_state=wait}, StreamID, [{error_response, Status, Headers0, Body}|Tail]) ->
+commands(State=#state{out_state=wait, out_streamid=StreamID}, StreamID,
+		[{error_response, Status, Headers0, Body}|Tail]) ->
 	%% We close the connection when the error response is 408, as it
 	%% indicates a timeout and the RFC recommends that we stop here. (RFC7231 6.5.7)
 	Headers = case Status of
@@ -926,31 +953,41 @@ commands(State0=#state{socket=Socket, transport=Transport, out_state=wait, strea
 	%% @todo I'm pretty sure the last stream in the list is the one we want
 	%% considering all others are queued.
 	#stream{version=Version} = lists:keyfind(StreamID, #stream.id, Streams),
-	{State, Headers} = connection(State0, Headers0, StreamID, Version),
+	{State1, Headers} = connection(State0, Headers0, StreamID, Version),
+	State = State1#state{out_state=done},
 	%% @todo Ensure content-length is set.
 	Response = cow_http:response(StatusCode, 'HTTP/1.1', headers_to_list(Headers)),
 	case Body of
-		{sendfile, O, B, P} ->
+		{sendfile, _, _, _} ->
 			Transport:send(Socket, Response),
-			commands(State, StreamID, [{sendfile, fin, O, B, P}|Tail]);
+			sendfile(State, Body);
 		_ ->
-			Transport:send(Socket, [Response, Body]),
-			commands(State#state{out_state=done}, StreamID, Tail)
-	end;
+			Transport:send(Socket, [Response, Body])
+	end,
+	commands(State, StreamID, Tail);
 %% Send response headers and initiate chunked encoding or streaming.
-commands(State0=#state{socket=Socket, transport=Transport, streams=Streams0, out_state=OutState},
+commands(State0=#state{socket=Socket, transport=Transport,
+		opts=Opts, overriden_opts=Override, streams=Streams0, out_state=OutState},
 		StreamID, [{headers, StatusCode, Headers0}|Tail]) ->
 	%% @todo Same as above (about the last stream in the list).
 	Stream = #stream{version=Version} = lists:keyfind(StreamID, #stream.id, Streams0),
 	Status = cow_http:status_to_integer(StatusCode),
 	ContentLength = maps:get(<<"content-length">>, Headers0, undefined),
+	%% Chunked transfer-encoding can be disabled on a per-request basis.
+	Chunked = case Override of
+		#{chunked := Chunked0} -> Chunked0;
+		_ -> maps:get(chunked, Opts, true)
+	end,
 	{State1, Headers1} = case {Status, ContentLength, Version} of
 		{204, _, 'HTTP/1.1'} ->
 			{State0#state{out_state=done}, Headers0};
-		{_, undefined, 'HTTP/1.1'} ->
+		{304, _, 'HTTP/1.1'} ->
+			{State0#state{out_state=done}, Headers0};
+		{_, undefined, 'HTTP/1.1'} when Chunked ->
 			{State0#state{out_state=chunked}, Headers0#{<<"transfer-encoding">> => <<"chunked">>}};
-		%% Close the connection after streaming without content-length to HTTP/1.0 client.
-		{_, undefined, 'HTTP/1.0'} ->
+		%% Close the connection after streaming without content-length
+		%% to all HTTP/1.0 clients and to HTTP/1.1 clients when chunked is disabled.
+		{_, undefined, _} ->
 			{State0#state{out_state=streaming, last_streamid=StreamID}, Headers0};
 		%% Stream the response body without chunked transfer-encoding.
 		_ ->
@@ -967,53 +1004,57 @@ commands(State0=#state{socket=Socket, transport=Transport, streams=Streams0, out
 	Transport:send(Socket, cow_http:response(StatusCode, 'HTTP/1.1', headers_to_list(Headers))),
 	commands(State, StreamID, Tail);
 %% Send a response body chunk.
-%%
-%% @todo WINDOW_UPDATE stuff require us to buffer some data.
-%% @todo We probably want to allow Data to be the {sendfile, ...} tuple also.
+%% @todo We need to kill the stream if it tries to send data before headers.
 commands(State0=#state{socket=Socket, transport=Transport, streams=Streams0, out_state=OutState},
 		StreamID, [{data, IsFin, Data}|Tail]) ->
 	%% Do not send anything when the user asks to send an empty
 	%% data frame, as that would break the protocol.
-	Size = iolist_size(Data),
-	Stream0 = lists:keyfind(StreamID, #stream.id, Streams0),
-	Stream = case Size of
-		0 ->
-			%% We send the last chunk only if version is HTTP/1.1 and IsFin=fin.
-			case {OutState, Stream0} of
-				{_, #stream{method= <<"HEAD">>}} ->
-					ok;
-				{chunked, _} when IsFin =:= fin ->
-					Transport:send(Socket, <<"0\r\n\r\n">>);
-				_ ->
-					ok
-			end,
+	Size = case Data of
+		{sendfile, _, B, _} -> B;
+		_ -> iolist_size(Data)
+	end,
+	%% Depending on the current state we may need to send nothing,
+	%% the last chunk, chunked data with/without the last chunk,
+	%% or just the data as-is.
+	Stream = case lists:keyfind(StreamID, #stream.id, Streams0) of
+		Stream0=#stream{method= <<"HEAD">>} ->
 			Stream0;
-		_ ->
-			%% @todo We need to kill the stream if it tries to send data before headers.
-			%% @todo Same as above.
-			case {OutState, Stream0} of
-				{_, #stream{method= <<"HEAD">>}} ->
-					Stream0;
-				{chunked, _} ->
-					Transport:send(Socket, [
-						integer_to_binary(Size, 16), <<"\r\n">>, Data,
-						case IsFin of
-							fin -> <<"\r\n0\r\n\r\n">>;
-							nofin -> <<"\r\n">>
-						end
-					]),
-					Stream0;
-				{streaming, #stream{local_sent_size=SentSize0, local_expected_size=ExpectedSize}} ->
-					SentSize = SentSize0 + Size,
-					if
-						%% undefined is > any integer value.
-						SentSize > ExpectedSize ->
-							terminate(State0, response_body_too_large);
-						true ->
-							Transport:send(Socket, Data),
-							Stream0#stream{local_sent_size=SentSize}
-					end
-			end
+		Stream0 when Size =:= 0, IsFin =:= fin, OutState =:= chunked ->
+			Transport:send(Socket, <<"0\r\n\r\n">>),
+			Stream0;
+		Stream0 when Size =:= 0 ->
+			Stream0;
+		Stream0 when is_tuple(Data), OutState =:= chunked ->
+			Transport:send(Socket, [integer_to_binary(Size, 16), <<"\r\n">>]),
+			sendfile(State0, Data),
+			Transport:send(Socket,
+				case IsFin of
+					fin -> <<"\r\n0\r\n\r\n">>;
+					nofin -> <<"\r\n">>
+				end),
+			Stream0;
+		Stream0 when OutState =:= chunked ->
+			Transport:send(Socket, [
+				integer_to_binary(Size, 16), <<"\r\n">>, Data,
+				case IsFin of
+					fin -> <<"\r\n0\r\n\r\n">>;
+					nofin -> <<"\r\n">>
+				end
+			]),
+			Stream0;
+		Stream0 when OutState =:= streaming ->
+			#stream{local_sent_size=SentSize0, local_expected_size=ExpectedSize} = Stream0,
+			SentSize = SentSize0 + Size,
+			if
+				%% ExpectedSize may be undefined, which is > any integer value.
+				SentSize > ExpectedSize ->
+					terminate(State0, response_body_too_large);
+				is_tuple(Data) ->
+					sendfile(State0, Data);
+				true ->
+					Transport:send(Socket, Data)
+			end,
+			Stream0#stream{local_sent_size=SentSize}
 	end,
 	State = case IsFin of
 		fin -> State0#state{out_state=done};
@@ -1036,34 +1077,6 @@ commands(State=#state{socket=Socket, transport=Transport, streams=Streams, out_s
 			ok
 	end,
 	commands(State#state{out_state=done}, StreamID, Tail);
-%% Send a file.
-commands(State0=#state{socket=Socket, transport=Transport}, StreamID,
-		[{sendfile, IsFin, Offset, Bytes, Path}|Tail]) ->
-	%% @todo exit with response_body_too_large if we exceed content-length
-	%% We wrap the sendfile call into a try/catch because on OTP-20
-	%% and earlier a few different crashes could occur for sockets
-	%% that were closing or closed. For example a badarg in
-	%% erlang:port_get_data(#Port<...>) or a badmatch like
-	%% {{badmatch,{error,einval}},[{prim_file,sendfile,8,[]}...
-	%%
-	%% OTP-21 uses a NIF instead of a port so the implementation
-	%% and behavior has dramatically changed and it is unclear
-	%% whether it will be necessary in the future.
-	%%
-	%% This try/catch prevents some noisy logs to be written
-	%% when these errors occur.
-	try
-		Transport:sendfile(Socket, Path, Offset, Bytes),
-		State = case IsFin of
-			fin -> State0#state{out_state=done}
-%% @todo Add the sendfile command.
-%			nofin -> State0
-		end,
-		commands(State, StreamID, Tail)
-	catch _:_ ->
-		terminate(State0, {socket_error, sendfile_crash,
-			'An error occurred when using the sendfile function.'})
-	end;
 %% Protocol takeover.
 commands(State0=#state{ref=Ref, parent=Parent, socket=Socket, transport=Transport,
 		out_state=OutState, opts=Opts, children=Children}, StreamID,
@@ -1093,6 +1106,22 @@ commands(State0=#state{ref=Ref, parent=Parent, socket=Socket, transport=Transpor
 	%% we need to let this module go entirely. Perhaps it should be handled directly in
 	%% cowboy_clear/cowboy_tls?
 	Protocol:takeover(Parent, Ref, Socket, Transport, Opts, <<>>, InitialState);
+%% Set options dynamically.
+commands(State0=#state{overriden_opts=Opts},
+		StreamID, [{set_options, SetOpts}|Tail]) ->
+	State1 = case SetOpts of
+		#{idle_timeout := IdleTimeout} ->
+			set_timeout(State0#state{overriden_opts=Opts#{idle_timeout => IdleTimeout}});
+		_ ->
+			State0
+	end,
+	State = case SetOpts of
+		#{chunked := Chunked} ->
+			State1#state{overriden_opts=Opts#{chunked => Chunked}};
+		_ ->
+			State1
+	end,
+	commands(State, StreamID, Tail);
 %% Stream shutdown.
 commands(State, StreamID, [stop|Tail]) ->
 	%% @todo Do we want to run the commands after a stop?
@@ -1117,6 +1146,32 @@ headers_to_list(Headers0=#{<<"set-cookie">> := SetCookies}) ->
 	Headers1 ++ [{<<"set-cookie">>, Value} || Value <- SetCookies];
 headers_to_list(Headers) ->
 	maps:to_list(Headers).
+
+%% We wrap the sendfile call into a try/catch because on OTP-20
+%% and earlier a few different crashes could occur for sockets
+%% that were closing or closed. For example a badarg in
+%% erlang:port_get_data(#Port<...>) or a badmatch like
+%% {{badmatch,{error,einval}},[{prim_file,sendfile,8,[]}...
+%%
+%% OTP-21 uses a NIF instead of a port so the implementation
+%% and behavior has dramatically changed and it is unclear
+%% whether it will be necessary in the future.
+%%
+%% This try/catch prevents some noisy logs to be written
+%% when these errors occur.
+sendfile(State=#state{socket=Socket, transport=Transport, opts=Opts},
+		{sendfile, Offset, Bytes, Path}) ->
+	try
+		%% When sendfile is disabled we explicitly use the fallback.
+		_ = case maps:get(sendfile, Opts, true) of
+			true -> Transport:sendfile(Socket, Path, Offset, Bytes);
+			false -> ranch_transport:sendfile(Transport, Socket, Path, Offset, Bytes, [])
+		end,
+		ok
+	catch _:_ ->
+		terminate(State, {socket_error, sendfile_crash,
+			'An error occurred when using the sendfile function.'})
+	end.
 
 %% Flush messages specific to cowboy_http before handing over the
 %% connection to another protocol.
@@ -1167,10 +1222,10 @@ stream_terminate(State0=#state{opts=Opts, in_streamid=InStreamID, in_state=InSta
 		_ -> %% done or Version =:= 'HTTP/1.0'
 			State0
 	end,
-	%% Remove the stream from the state.
+	%% Remove the stream from the state and reset the overriden options.
 	{value, #stream{state=StreamState}, Streams}
 		= lists:keytake(StreamID, #stream.id, Streams1),
-	State2 = State1#state{streams=Streams},
+	State2 = State1#state{streams=Streams, overriden_opts=#{}},
 	%% Stop the stream.
 	stream_call_terminate(StreamID, Reason, StreamState, State2),
 	Children = cowboy_children:shutdown(Children0, StreamID),
@@ -1216,7 +1271,8 @@ stream_call_terminate(StreamID, Reason, StreamState, #state{opts=Opts}) ->
 			Class, Exception, erlang:get_stacktrace()), Opts)
 	end.
 
-%% @todo max_reqs also
+maybe_req_close(#state{opts=#{http10_keepalive := false}}, _, 'HTTP/1.0') ->
+	close;
 maybe_req_close(_, #{<<"connection">> := Conn}, 'HTTP/1.0') ->
 	Conns = cow_http_hd:parse_connection(Conn),
 	case lists:member(<<"keep-alive">>, Conns) of
@@ -1230,7 +1286,7 @@ maybe_req_close(_, #{<<"connection">> := Conn}, 'HTTP/1.1') ->
 		true -> close;
 		false -> keepalive
 	end;
-maybe_req_close(_State, _, _) ->
+maybe_req_close(_, _, _) ->
 	keepalive.
 
 connection(State=#state{last_streamid=StreamID}, Headers=#{<<"connection">> := Conn}, StreamID, _) ->
@@ -1381,8 +1437,7 @@ system_continue(_, _, {State, Buffer}) ->
 
 -spec system_terminate(any(), _, _, {#state{}, binary()}) -> no_return().
 system_terminate(Reason, _, _, {State, _}) ->
-	%% @todo We should exit gracefully, if possible.
-	terminate(State, Reason).
+	terminate(State, {stop, {exit, Reason}, 'sys:terminate/2,3 was called.'}).
 
 -spec system_code_change(Misc, _, _, _) -> {ok, Misc} when Misc::{#state{}, binary()}.
 system_code_change(Misc, _, _, _) ->

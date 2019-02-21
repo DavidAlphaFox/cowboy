@@ -22,29 +22,12 @@
 %% ct.
 
 all() ->
-	[{group, ws}, {group, autobahn}].
+	[{group, ws}].
 
 groups() ->
-	BaseTests = ct_helper:all(?MODULE) -- [autobahn_fuzzingclient],
-	[{autobahn, [], [autobahn_fuzzingclient]}, {ws, [parallel], BaseTests}].
+	[{ws, [parallel], ct_helper:all(?MODULE)}].
 
-init_per_group(Name = autobahn, Config) ->
-	%% Some systems have it named pip2.
-	Out = os:cmd("pip show autobahntestsuite ; pip2 show autobahntestsuite"),
-	case string:str(Out, "autobahntestsuite") of
-		0 ->
-			ct:print("Skipping the autobahn group because the "
-				"Autobahn Test Suite is not installed.~nTo install it, "
-				"please follow the instructions on this page:~n~n    "
-				"http://autobahn.ws/testsuite/installation.html"),
-			{skip, "Autobahn Test Suite not installed."};
-		_ ->
-			{ok, _} = cowboy:start_clear(Name, [{port, 33080}], #{
-				env => #{dispatch => init_dispatch()}
-			}),
-			Config
-	end;
-init_per_group(Name = ws, Config) ->
+init_per_group(Name, Config) ->
 	cowboy_test:init_http(Name, #{
 		env => #{dispatch => init_dispatch()}
 	}, Config).
@@ -83,39 +66,12 @@ init_dispatch() ->
 			{"/terminate", ws_terminate_h, []},
 			{"/ws_timeout_hibernate", ws_timeout_hibernate, []},
 			{"/ws_timeout_cancel", ws_timeout_cancel, []},
-			{"/ws_max_frame_size", ws_max_frame_size, []}
+			{"/ws_max_frame_size", ws_max_frame_size, []},
+			{"/ws_deflate_opts", ws_deflate_opts_h, []}
 		]}
 	]).
 
 %% Tests.
-
-autobahn_fuzzingclient(Config) ->
-	doc("Autobahn test suite for the Websocket protocol."),
-	Self = self(),
-	spawn_link(fun() -> do_start_port(Config, Self) end),
-	receive autobahn_exit -> ok end,
-	ct:log("<h2><a href=\"log_private/reports/servers/index.html\">Full report</a></h2>~n"),
-	Report = config(priv_dir, Config) ++ "reports/servers/index.html",
-	ct:print("Autobahn Test Suite report: file://~s~n", [Report]),
-	{ok, HTML} = file:read_file(Report),
-	case length(binary:matches(HTML, <<"case_failed">>)) > 2 of
-		true -> error(failed);
-		false -> ok
-	end.
-
-do_start_port(Config, Pid) ->
-	Port = open_port({spawn, "wstest -m fuzzingclient -s " ++ config(data_dir, Config) ++ "client.json"},
-		[{line, 10000}, {cd, config(priv_dir, Config)}, binary, eof]),
-	do_receive_infinity(Port, Pid).
-
-do_receive_infinity(Port, Pid) ->
-	receive
-		{Port, {data, {eol, Line}}} ->
-			io:format(user, "~s~n", [Line]),
-			do_receive_infinity(Port, Pid);
-		{Port, eof} ->
-			Pid ! autobahn_exit
-	end.
 
 unlimited_connections(Config) ->
 	doc("Websocket connections are not limited. The connections "
@@ -225,6 +181,123 @@ do_ws_version(Socket) ->
 	%% Client-initiated ping/pong.
 	ok = gen_tcp:send(Socket, << 1:1, 0:3, 9:4, 1:1, 0:7, 0:32 >>),
 	{ok, << 1:1, 0:3, 10:4, 0:8 >>} = gen_tcp:recv(Socket, 0, 6000),
+	%% Client-initiated close.
+	ok = gen_tcp:send(Socket, << 1:1, 0:3, 8:4, 1:1, 0:7, 0:32 >>),
+	{ok, << 1:1, 0:3, 8:4, 0:8 >>} = gen_tcp:recv(Socket, 0, 6000),
+	{error, closed} = gen_tcp:recv(Socket, 0, 6000),
+	ok.
+
+ws_deflate_opts_client_context_takeover(Config) ->
+	doc("Handler is configured with client context takeover enabled."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?client_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?client_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover\r\n", Config),
+	{_, "permessage-deflate; client_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+ws_deflate_opts_client_no_context_takeover(Config) ->
+	doc("Handler is configured with client context takeover disabled."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?client_no_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate; client_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?client_no_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover\r\n", Config),
+	{_, "permessage-deflate; client_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+%% We must send client_max_window_bits to indicate we support it.
+ws_deflate_opts_client_max_window_bits(Config) ->
+	doc("Handler is configured with client max window bits."),
+	{ok, _, Headers} = do_handshake("/ws_deflate_opts?client_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n", Config),
+	{_, "permessage-deflate; client_max_window_bits=9"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers),
+	ok.
+
+ws_deflate_opts_client_max_window_bits_override(Config) ->
+	doc("Handler is configured with client max window bits."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?client_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=8\r\n", Config),
+	{_, "permessage-deflate; client_max_window_bits=8"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?client_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=12\r\n", Config),
+	{_, "permessage-deflate; client_max_window_bits=9"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+ws_deflate_opts_server_context_takeover(Config) ->
+	doc("Handler is configured with server context takeover enabled."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?server_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?server_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover\r\n", Config),
+	{_, "permessage-deflate; server_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+ws_deflate_opts_server_no_context_takeover(Config) ->
+	doc("Handler is configured with server context takeover disabled."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?server_no_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate; server_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?server_no_context_takeover",
+		"Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover\r\n", Config),
+	{_, "permessage-deflate; server_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+ws_deflate_opts_server_max_window_bits(Config) ->
+	doc("Handler is configured with server max window bits."),
+	{ok, _, Headers} = do_handshake("/ws_deflate_opts?server_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate; server_max_window_bits=9"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers),
+	ok.
+
+ws_deflate_opts_server_max_window_bits_override(Config) ->
+	doc("Handler is configured with server max window bits."),
+	{ok, _, Headers1} = do_handshake("/ws_deflate_opts?server_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=8\r\n", Config),
+	{_, "permessage-deflate; server_max_window_bits=8"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers1),
+	{ok, _, Headers2} = do_handshake("/ws_deflate_opts?server_max_window_bits",
+		"Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=12\r\n", Config),
+	{_, "permessage-deflate; server_max_window_bits=9"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers2),
+	ok.
+
+ws_deflate_opts_zlevel(Config) ->
+	doc("Handler is configured with zlib level."),
+	do_ws_deflate_opts_z("/ws_deflate_opts?level", Config).
+
+ws_deflate_opts_zmemlevel(Config) ->
+	doc("Handler is configured with zlib mem_level."),
+	do_ws_deflate_opts_z("/ws_deflate_opts?mem_level", Config).
+
+ws_deflate_opts_zstrategy(Config) ->
+	doc("Handler is configured with zlib strategy."),
+	do_ws_deflate_opts_z("/ws_deflate_opts?strategy", Config).
+
+do_ws_deflate_opts_z(Path, Config) ->
+	{ok, Socket, Headers} = do_handshake(Path,
+		"Sec-WebSocket-Extensions: permessage-deflate\r\n", Config),
+	{_, "permessage-deflate"} = lists:keyfind("sec-websocket-extensions", 1, Headers),
+	%% Send and receive a compressed "Hello" frame.
+	Mask = 16#11223344,
+	CompressedHello = << 242, 72, 205, 201, 201, 7, 0 >>,
+	MaskedHello = do_mask(CompressedHello, Mask, <<>>),
+	ok = gen_tcp:send(Socket, << 1:1, 1:1, 0:2, 1:4, 1:1, 7:7, Mask:32, MaskedHello/binary >>),
+	{ok, << 1:1, 1:1, 0:2, 1:4, 0:1, 7:7, CompressedHello/binary >>} = gen_tcp:recv(Socket, 0, 6000),
 	%% Client-initiated close.
 	ok = gen_tcp:send(Socket, << 1:1, 0:3, 8:4, 1:1, 0:7, 0:32 >>),
 	{ok, << 1:1, 0:3, 8:4, 0:8 >>} = gen_tcp:recv(Socket, 0, 6000),

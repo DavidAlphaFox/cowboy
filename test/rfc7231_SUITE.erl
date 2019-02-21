@@ -150,14 +150,16 @@ method_delete(Config) ->
 	{ok, <<"DELETE">>} = gun:await_body(ConnPid, Ref),
 	ok.
 
-method_connect(Config) ->
-	doc("The CONNECT method is currently not implemented. (RFC7231 4.3.6)"),
-	ConnPid = gun_open(Config),
-	Ref = gun:request(ConnPid, <<"CONNECT">>, "localhost:8080", [
-		{<<"accept-encoding">>, <<"gzip">>}
-	]),
-	{response, fin, 501, _} = gun:await(ConnPid, Ref),
-	ok.
+%% @todo This test is currently broken because Gun does not
+%% send a proper CONNECT request.
+%method_connect(Config) ->
+%	doc("The CONNECT method is currently not implemented. (RFC7231 4.3.6)"),
+%	ConnPid = gun_open(Config),
+%	Ref = gun:request(ConnPid, <<"CONNECT">>, "localhost:8080", [
+%		{<<"accept-encoding">>, <<"gzip">>}
+%	]),
+%	{response, fin, 501, _} = gun:await(ConnPid, Ref),
+%	ok.
 
 %   A client sending a CONNECT request MUST send the authority form of
 %   request-target (Section 5.3 of [RFC7230]); i.e., the request-target
@@ -609,6 +611,16 @@ status_code_404(Config) ->
 	{response, _, 404, _} = gun:await(ConnPid, Ref),
 	ok.
 
+status_code_404_not_found(Config) ->
+	doc("The 404 Not Found status code is sent when the target "
+		"resource does not exist. (RFC7231 6.5.4)"),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/not/found", [
+		{<<"accept-encoding">>, <<"gzip">>}
+	]),
+	{response, _, 404, _} = gun:await(ConnPid, Ref),
+	ok.
+
 status_code_405(Config) ->
 	doc("The 405 Method Not Allowed status code can be sent. (RFC7231 6.5.5)"),
 	ConnPid = gun_open(Config),
@@ -894,6 +906,24 @@ date_5xx(Config) ->
 	]),
 	{response, _, 500, Headers} = gun:await(ConnPid, Ref),
 	{_, _} = lists:keyfind(<<"date">>, 1, Headers),
+	ok.
+
+server_header(Config) ->
+	doc("An origin server may generate a server header field. "
+		"Cowboy generates a small one by default. (RFC7231 7.4.2)"),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/"),
+	{response, _, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"Cowboy">>} = lists:keyfind(<<"server">>, 1, Headers),
+	ok.
+
+server_header_override(Config) ->
+	doc("An origin server may generate a server header field. "
+		"Cowboy allows the user to override the default. (RFC7231 7.4.2)"),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/resp/set_resp_header_server"),
+	{response, _, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"nginx">>} = lists:keyfind(<<"server">>, 1, Headers),
 	ok.
 
 %% @todo It's worth revisiting this RFC in the context of cowboy_rest

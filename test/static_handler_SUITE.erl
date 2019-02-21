@@ -23,7 +23,10 @@
 %% ct.
 
 all() ->
-	cowboy_test:common_all().
+	cowboy_test:common_all() ++ [
+		{group, http_no_sendfile},
+		{group, h2c_no_sendfile}
+	].
 
 groups() ->
 	AllTests = ct_helper:all(?MODULE),
@@ -44,14 +47,13 @@ groups() ->
 		{http_compress, [parallel], GroupTests},
 		{https_compress, [parallel], GroupTests},
 		{h2_compress, [parallel], GroupTests},
-		{h2c_compress, [parallel], GroupTests}
+		{h2c_compress, [parallel], GroupTests},
+		%% No real need to test sendfile disabled against https or h2.
+		{http_no_sendfile, [parallel], GroupTests},
+		{h2c_no_sendfile, [parallel], GroupTests}
 	].
 
 init_per_suite(Config) ->
-	%% @todo When we can chain stream handlers, write one
-	%% to hide these expected errors.
-	ct:print("This test suite will produce error reports. "
-		"The path for these expected errors begins with '/bad' or '/char'."),
 	%% Two static folders are created: one in ct_helper's private directory,
 	%% and one in the test run private directory.
 	PrivDir = code:priv_dir(ct_helper) ++ "/static",
@@ -68,19 +70,25 @@ init_per_suite(Config) ->
 	%% A special folder contains files of 1 character from 0 to 127.
 	CharDir = config(priv_dir, Config) ++ "/char",
 	ok = filelib:ensure_dir(CharDir ++ "/file"),
-	Chars = lists:flatten([case file:write_file(CharDir ++ [$/, C], [C]) of
+	Chars0 = lists:flatten([case file:write_file(CharDir ++ [$/, C], [C]) of
 		ok -> C;
 		{error, _} -> []
 	end || C <- lists:seq(0, 127)]),
-	[{static_dir, StaticDir}, {char_dir, CharDir}, {chars, Chars}|Config].
+	%% Determine whether we are on a case insensitive filesystem and
+	%% remove uppercase characters in that case. On case insensitive
+	%% filesystems we end up overwriting the "A" file with the "a" contents.
+	{CaseSensitive, Chars} = case file:read_file(CharDir ++ "/A") of
+		{ok, <<"A">>} -> {true, Chars0};
+		{ok, <<"a">>} -> {false, Chars0 -- "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+	end,
+	[{static_dir, StaticDir}, {char_dir, CharDir},
+		{chars, Chars}, {case_sensitive, CaseSensitive}|Config].
 
 end_per_suite(Config) ->
-	ct:print("This test suite produced error reports. "
-		"The path for these expected errors begins with '/bad' or '/char'."),
 	%% Special directory.
 	CharDir = config(char_dir, Config),
 	_ = [file:delete(CharDir ++ [$/, C]) || C <- lists:seq(0, 127)],
-	file:del_dir(CharDir),
+	_ = file:del_dir(CharDir),
 	%% Static directories.
 	StaticDir = config(static_dir, Config),
 	PrivDir = code:priv_dir(ct_helper) ++ "/static",
@@ -94,10 +102,26 @@ init_per_group(dir, Config) ->
 	[{prefix, "/dir"}|Config];
 init_per_group(priv_dir, Config) ->
 	[{prefix, "/priv_dir"}|Config];
-init_per_group(tttt, Config) ->
-	Config;
+init_per_group(Name=http_no_sendfile, Config) ->
+	cowboy_test:init_http(Name, #{
+		env => #{dispatch => init_dispatch(Config)},
+		middlewares => [?MODULE, cowboy_router, cowboy_handler],
+		sendfile => false
+	}, [{flavor, vanilla}|Config]);
+init_per_group(Name=h2c_no_sendfile, Config) ->
+	Config1 = cowboy_test:init_http(Name, #{
+		env => #{dispatch => init_dispatch(Config)},
+		middlewares => [?MODULE, cowboy_router, cowboy_handler],
+		sendfile => false
+	}, [{flavor, vanilla}|Config]),
+	lists:keyreplace(protocol, 1, Config1, {protocol, http2});
 init_per_group(Name, Config) ->
-	cowboy_test:init_common_groups(Name, Config, ?MODULE).
+	Config1 = cowboy_test:init_common_groups(Name, Config, ?MODULE),
+	Opts = ranch:get_protocol_options(Name),
+	ok = ranch:set_protocol_options(Name, Opts#{
+		middlewares => [?MODULE, cowboy_router, cowboy_handler]
+	}),
+	Config1.
 
 end_per_group(Name, _) ->
 	cowboy:stop_listener(Name).
@@ -132,6 +156,12 @@ init_dispatch(Config) ->
 			[{mimetypes, <<"application/vnd.ninenines.cowboy+xml;v=1">>}]}},
 		{"/mime/hardcode/tuple-form", cowboy_static, {priv_file, ct_helper, "static/file.cowboy",
 			[{mimetypes, {<<"application">>, <<"vnd.ninenines.cowboy+xml">>, [{<<"v">>, <<"1">>}]}}]}},
+		{"/charset/custom/[...]", cowboy_static, {priv_dir, ct_helper, "static",
+			[{charset, ?MODULE, do_charset_custom}]}},
+		{"/charset/crash/[...]", cowboy_static, {priv_dir, ct_helper, "static",
+			[{charset, ?MODULE, do_charset_crash}]}},
+		{"/charset/hardcode/[...]", cowboy_static, {priv_file, ct_helper, "static/index.html",
+			[{charset, <<"utf-8">>}]}},
 		{"/etag/custom", cowboy_static, {file, config(static_dir, Config) ++ "/style.css",
 			[{etag, ?MODULE, do_etag_custom}]}},
 		{"/etag/crash", cowboy_static, {file, config(static_dir, Config) ++ "/style.css",
@@ -151,6 +181,7 @@ init_dispatch(Config) ->
 		{"/bad/file/path", cowboy_static, {file, "/bad/path/style.css"}},
 		{"/bad/options", cowboy_static, {priv_file, ct_helper, "static/style.css", bad}},
 		{"/bad/options/mime", cowboy_static, {priv_file, ct_helper, "static/style.css", [{mimetypes, bad}]}},
+		{"/bad/options/charset", cowboy_static, {priv_file, ct_helper, "static/style.css", [{charset, bad}]}},
 		{"/bad/options/etag", cowboy_static, {priv_file, ct_helper, "static/style.css", [{etag, true}]}},
 		{"/unknown/option", cowboy_static, {priv_file, ct_helper, "static/style.css", [{bad, option}]}},
 		{"/char/[...]", cowboy_static, {dir, config(char_dir, Config)}},
@@ -160,8 +191,38 @@ init_dispatch(Config) ->
 		{"/bad/ez_priv_dir/[...]", cowboy_static, {priv_dir, static_files_app, "cgi-bin"}}
 	]}]).
 
+%% Middleware interface to silence expected errors.
+
+execute(Req=#{path := Path}, Env) ->
+	case Path of
+		<<"/bad/priv_dir/app/", _/bits>> -> ct_helper:ignore(cowboy_static, priv_path, 2);
+		<<"/bad/priv_file/app">> -> ct_helper:ignore(cowboy_static, priv_path, 2);
+		<<"/bad/priv_dir/route">> -> ct_helper:ignore(cowboy_static, escape_reserved, 1);
+		<<"/bad/dir/route">> -> ct_helper:ignore(cowboy_static, escape_reserved, 1);
+		<<"/bad">> -> ct_helper:ignore(cowboy_static, init_opts, 2);
+		<<"/bad/options">> -> ct_helper:ignore(cowboy_static, content_types_provided, 2);
+		<<"/bad/options/mime">> -> ct_helper:ignore(cowboy_rest, set_content_type, 2);
+		<<"/bad/options/etag">> -> ct_helper:ignore(cowboy_static, generate_etag, 2);
+		<<"/bad/options/charset">> -> ct_helper:ignore(cowboy_static, charsets_provided, 2);
+		_ -> ok
+	end,
+	{ok, Req, Env}.
+
 %% Internal functions.
 
+-spec do_charset_crash(_) -> no_return().
+do_charset_crash(_) ->
+	ct_helper_error_h:ignore(?MODULE, do_charset_crash, 1),
+	exit(crash).
+
+do_charset_custom(Path) ->
+	case filename:extension(Path) of
+		<<".cowboy">> -> <<"utf-32">>;
+		<<".html">> -> <<"utf-16">>;
+		_ -> <<"utf-8">>
+	end.
+
+-spec do_etag_crash(_, _, _) -> no_return().
 do_etag_crash(_, _, _) ->
 	ct_helper_error_h:ignore(?MODULE, do_etag_crash, 3),
 	exit(crash).
@@ -169,6 +230,7 @@ do_etag_crash(_, _, _) ->
 do_etag_custom(_, _, _) ->
 	{strong, <<"etag">>}.
 
+-spec do_mime_crash(_) -> no_return().
 do_mime_crash(_) ->
 	ct_helper_error_h:ignore(?MODULE, do_mime_crash, 1),
 	exit(crash).
@@ -224,6 +286,11 @@ bad_file_path(Config) ->
 bad_options(Config) ->
 	doc("Bad cowboy_static extra options: not a list."),
 	{500, _, _} = do_get("/bad/options", Config),
+	ok.
+
+bad_options_charset(Config) ->
+	doc("Bad cowboy_static extra options: invalid charset option."),
+	{500, _, _} = do_get("/bad/options/charset", Config),
 	ok.
 
 bad_options_etag(Config) ->
@@ -356,9 +423,8 @@ dir_error_directory_slash(Config) ->
 
 dir_error_doesnt_exist(Config) ->
 	doc("Try to get a file that does not exist."),
-	%% @todo Check that the content-type header is removed.
-	{404, _Headers, _} = do_get(config(prefix, Config) ++ "/not.found", Config),
-%	false = lists:keyfind(<<"content-type">>, 1, Headers),
+	{404, Headers, _} = do_get(config(prefix, Config) ++ "/not.found", Config),
+	false = lists:keyfind(<<"content-type">>, 1, Headers),
 	ok.
 
 dir_error_dot(Config) ->
@@ -744,15 +810,44 @@ mime_custom_txt(Config) ->
 	ok.
 
 mime_hardcode_binary(Config) ->
-	doc("Get a .cowboy file with hardcoded route."),
+	doc("Get a .cowboy file with hardcoded route and media type in binary form."),
 	{200, Headers, _} = do_get("/mime/hardcode/binary-form", Config),
 	{_, <<"application/vnd.ninenines.cowboy+xml;v=1">>} = lists:keyfind(<<"content-type">>, 1, Headers),
 	ok.
 
 mime_hardcode_tuple(Config) ->
-	doc("Get a .cowboy file with hardcoded route."),
+	doc("Get a .cowboy file with hardcoded route and media type in tuple form."),
 	{200, Headers, _} = do_get("/mime/hardcode/tuple-form", Config),
 	{_, <<"application/vnd.ninenines.cowboy+xml;v=1">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+charset_crash(Config) ->
+	doc("Get a file with a crashing charset function."),
+	{500, _, _} = do_get("/charset/crash/style.css", Config),
+	ok.
+
+charset_custom_cowboy(Config) ->
+	doc("Get a .cowboy file."),
+	{200, Headers, _} = do_get("/charset/custom/file.cowboy", Config),
+	{_, <<"application/octet-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+charset_custom_css(Config) ->
+	doc("Get a .css file."),
+	{200, Headers, _} = do_get("/charset/custom/style.css", Config),
+	{_, <<"text/css; charset=utf-8">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+charset_custom_html(Config) ->
+	doc("Get a .html file."),
+	{200, Headers, _} = do_get("/charset/custom/index.html", Config),
+	{_, <<"text/html; charset=utf-16">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
+charset_hardcode_binary(Config) ->
+	doc("Get a .html file with hardcoded route and charset."),
+	{200, Headers, _} = do_get("/charset/hardcode", Config),
+	{_, <<"text/html; charset=utf-8">>} = lists:keyfind(<<"content-type">>, 1, Headers),
 	ok.
 
 priv_dir_in_ez_archive(Config) ->
@@ -773,20 +868,33 @@ priv_file_in_ez_archive(Config) ->
 	{_, <<"text/html">>} = lists:keyfind(<<"content-type">>, 1, Headers),
 	ok.
 
+range_request(Config) ->
+	doc("Confirm that range requests are enabled."),
+	{206, Headers, <<"less space.\n">>} = do_get("/dir/plain.txt",
+		[{<<"range">>, <<"bytes=4-">>}], Config),
+	{_, <<"bytes">>} = lists:keyfind(<<"accept-ranges">>, 1, Headers),
+	{_, <<"bytes 4-15/16">>} = lists:keyfind(<<"content-range">>, 1, Headers),
+	{_, <<"application/octet-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
+
 unicode_basic_latin(Config) ->
 	doc("Get a file with non-urlencoded characters from Unicode Basic Latin block."),
-	_ = [case do_get("/char/" ++ [C], Config) of
-		{200, _, << C >>} -> ok;
-		Error -> exit({error, C, Error})
-	end || C <-
-		%% Excluding the dot which has a special meaning in URLs
-		%% when they are the only content in a path segment,
-		%% and is tested as part of filenames in other test cases.
+	%% Excluding the dot which has a special meaning in URLs
+	%% when they are the only content in a path segment,
+	%% and is tested as part of filenames in other test cases.
+	Chars0 =
 		"abcdefghijklmnopqrstuvwxyz"
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 		"0123456789"
-		":@-_~!$&'()*+,;="
-	],
+		":@-_~!$&'()*+,;=",
+	Chars = case config(case_sensitive, Config) of
+		false -> Chars0 -- "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		true -> Chars0
+	end,
+	_ = [case do_get("/char/" ++ [C], Config) of
+		{200, _, << C >>} -> ok;
+		Error -> exit({error, C, Error})
+	end || C <- Chars],
 	ok.
 
 unicode_basic_error(Config) ->

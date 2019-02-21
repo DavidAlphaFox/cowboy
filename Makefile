@@ -2,7 +2,7 @@
 
 PROJECT = cowboy
 PROJECT_DESCRIPTION = Small, fast, modern HTTP server.
-PROJECT_VERSION = 2.5.0
+PROJECT_VERSION = 2.6.1
 PROJECT_REGISTERED = cowboy_clock
 
 # Options.
@@ -15,8 +15,8 @@ CT_OPTS += -ct_hooks cowboy_ct_hook [] # -boot start_sasl
 LOCAL_DEPS = crypto
 
 DEPS = cowlib ranch
-dep_cowlib = git https://github.com/ninenines/cowlib 2.6.0
-dep_ranch = git https://github.com/ninenines/ranch 1.6.2
+dep_cowlib = git https://github.com/ninenines/cowlib 2.7.0
+dep_ranch = git https://github.com/ninenines/ranch 1.7.1
 
 DOC_DEPS = asciideck
 
@@ -38,6 +38,12 @@ AUTO_CI_WINDOWS ?= OTP-19+
 
 include erlang.mk
 
+# Don't run the examples test suite by default.
+
+ifndef FULL
+CT_SUITES := $(filter-out examples ws_autobahn,$(CT_SUITES))
+endif
+
 # Compile options.
 
 ERLC_OPTS += +warn_missing_spec +warn_untyped_record
@@ -49,7 +55,7 @@ app:: rebar.config
 
 # Dialyze the tests.
 
-# DIALYZER_OPTS += --src -r test
+DIALYZER_OPTS += --src -r test
 
 # h2spec setup.
 

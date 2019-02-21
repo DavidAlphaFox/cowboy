@@ -90,6 +90,7 @@ for or related to HTTP.
 * https://tools.ietf.org/html/rfc8336[RFC 8336]: The ORIGIN HTTP/2 Frame
 * https://tools.ietf.org/html/rfc8441[RFC 8441]: Bootstrapping WebSockets with HTTP/2
 * https://tools.ietf.org/html/rfc8470[RFC 8470]: Using Early Data in HTTP
+* https://tools.ietf.org/html/rfc8473[RFC 8473]: Token Binding over HTTP
 * https://www.w3.org/TR/webmention/[Webmention]: Webmention
 
 ==== Upcoming
@@ -126,6 +127,7 @@ for or related to HTTP.
 * http://www.w3.org/TR/html51/[HTML5.1]
 * https://www.w3.org/TR/html52/[HTML5.2]
 * http://www.w3.org/TR/media-frags/[Media Fragments URI 1.0]
+* https://tools.ietf.org/html/rfc6657[RFC 6657]: Update to MIME regarding "charset" Parameter Handling in Textual Media Types
 * https://tools.ietf.org/html/rfc6690[RFC 6690]: Constrained RESTful Environments (CoRE) Link Format
 * https://tools.ietf.org/html/rfc7807[RFC 7807]: Problem Details for HTTP APIs
 * https://tools.ietf.org/html/rfc6906[RFC 6906]: The 'profile' Link Relation Type

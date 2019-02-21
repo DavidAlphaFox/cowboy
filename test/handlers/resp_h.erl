@@ -2,6 +2,10 @@
 
 -module(resp_h).
 
+%% @todo Probably should have a separate handler for errors,
+%% so that we can dialyze all the other correct calls.
+-dialyzer({nowarn_function, do/3}).
+
 -export([init/2]).
 
 init(Req, Opts) ->
@@ -25,6 +29,9 @@ do(<<"set_resp_cookie4">>, Req0, Opts) ->
 	{ok, cowboy_req:reply(200, #{}, "OK", Req), Opts};
 do(<<"set_resp_header">>, Req0, Opts) ->
 	Req = cowboy_req:set_resp_header(<<"content-type">>, <<"text/plain">>, Req0),
+	{ok, cowboy_req:reply(200, #{}, "OK", Req), Opts};
+do(<<"set_resp_header_server">>, Req0, Opts) ->
+	Req = cowboy_req:set_resp_header(<<"server">>, <<"nginx">>, Req0),
 	{ok, cowboy_req:reply(200, #{}, "OK", Req), Opts};
 do(<<"set_resp_headers">>, Req0, Opts) ->
 	Req = cowboy_req:set_resp_headers(#{
@@ -182,6 +189,9 @@ do(<<"stream_reply2">>, Req0, Opts) ->
 		<<"204">> ->
 			Req = cowboy_req:stream_reply(204, Req0),
 			{ok, Req, Opts};
+		<<"304">> ->
+			Req = cowboy_req:stream_reply(304, Req0),
+			{ok, Req, Opts};
 		Status ->
 			Req = cowboy_req:stream_reply(binary_to_integer(Status), Req0),
 			stream_body(Req),
@@ -214,6 +224,23 @@ do(<<"stream_body">>, Req0, Opts) ->
 		<<"nofin">> ->
 			Req = cowboy_req:stream_reply(200, Req0),
 			cowboy_req:stream_body(<<"Hello world!">>, nofin, Req),
+			{ok, Req, Opts};
+		<<"sendfile">> ->
+			AppFile = code:where_is_file("cowboy.app"),
+			AppSize = filelib:file_size(AppFile),
+			Req = cowboy_req:stream_reply(200, Req0),
+			cowboy_req:stream_body(<<"Hello ">>, nofin, Req),
+			cowboy_req:stream_body({sendfile, 0, AppSize, AppFile}, nofin, Req),
+			cowboy_req:stream_body(<<" interspersed ">>, nofin, Req),
+			cowboy_req:stream_body({sendfile, 0, AppSize, AppFile}, nofin, Req),
+			cowboy_req:stream_body(<<" world!">>, fin, Req),
+			{ok, Req, Opts};
+		<<"sendfile_fin">> ->
+			AppFile = code:where_is_file("cowboy.app"),
+			AppSize = filelib:file_size(AppFile),
+			Req = cowboy_req:stream_reply(200, Req0),
+			cowboy_req:stream_body(<<"Hello! ">>, nofin, Req),
+			cowboy_req:stream_body({sendfile, 0, AppSize, AppFile}, fin, Req),
 			{ok, Req, Opts};
 		_ ->
 			%% Call stream_body without initiating streaming.
