@@ -352,7 +352,7 @@ after_parse({more, State, Buffer}) ->
 	before_loop(State, Buffer).
 
 %% Request-line.
-
+%% 解析http的请求
 -spec parse_request(Buffer, State, non_neg_integer())
 	-> {request, cowboy_req:req(), State, Buffer}
 	| {data, cowboy_stream:streamid(), cowboy_stream:fin(), binary(), State, Buffer}
@@ -382,7 +382,7 @@ parse_request(Buffer, State=#state{opts=Opts, in_streamid=InStreamID}, EmptyLine
 		1 ->
 			<< _:16, Rest/bits >> = Buffer,
 			parse_request(Rest, State, EmptyLines + 1);
-		_ ->
+		_ -> %% 确定收到了第一行
 			case Buffer of
 				%% @todo * is only for server-wide OPTIONS request (RFC7230 5.3.4); tests
 				<< "OPTIONS * ", Rest/bits >> ->
@@ -630,7 +630,7 @@ horse_clean_value_ws_end() ->
 				"text/html;level=2;q=0.4, */*;q=0.5          ">>) - 1)
 	).
 -endif.
-
+%% 已经解析完header，进行请求操作
 request(Buffer, State=#state{transport=Transport, in_streamid=StreamID,
 		in_state=PS=#ps_header{authority=Authority, version=Version}}, Headers) ->
 	case maps:get(<<"host">>, Headers, undefined) of
@@ -760,7 +760,7 @@ request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock
 	end.
 
 %% HTTP/2 upgrade.
-
+%% 检查是否是http 1.1 向http 2 进行升级
 %% @todo We must not upgrade to h2c over a TLS connection.
 is_http2_upgrade(#{<<"connection">> := Conn, <<"upgrade">> := Upgrade,
 		<<"http2-settings">> := HTTP2Settings}, 'HTTP/1.1') ->
