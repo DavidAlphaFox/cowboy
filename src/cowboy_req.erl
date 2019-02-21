@@ -121,31 +121,47 @@
 }.
 -export_type([push_opts/0]).
 
--type req() :: map(). %% @todo #{
-%	ref := ranch:ref(),
-%	pid := pid(),
-%	streamid := cowboy_stream:streamid(),
-%	peer := {inet:ip_address(), inet:port_number()},
-%
-%	method := binary(), %% case sensitive
-%	version := cowboy:http_version() | atom(),
-%	scheme := binary(), %% <<"http">> or <<"https">>
-%	host := binary(), %% lowercase; case insensitive
-%	port := inet:port_number(),
-%	path := binary(), %% case sensitive
-%	qs := binary(), %% case sensitive
-%	headers := cowboy:http_headers(),
-%
-%	host_info => cowboy_router:tokens(),
-%	path_info => cowboy_router:tokens(),
-%	bindings => cowboy_router:bindings(),
-%
-%	has_body := boolean(),
-%	has_read_body => true,
-%	body_length := undefined | non_neg_integer()
-%
-%% @todo resp_*
-%}.
+-type req() :: #{
+	%% Public interface.
+	method := binary(),
+	version := cowboy:http_version() | atom(),
+	scheme := binary(),
+	host := binary(),
+	port := inet:port_number(),
+	path := binary(),
+	qs := binary(),
+	headers := cowboy:http_headers(),
+	peer := {inet:ip_address(), inet:port_number()},
+	sock := {inet:ip_address(), inet:port_number()},
+	cert := binary() | undefined,
+
+	%% Private interface.
+	ref := ranch:ref(),
+	pid := pid(),
+	streamid := cowboy_stream:streamid(),
+
+	host_info => cowboy_router:tokens(),
+	path_info => cowboy_router:tokens(),
+	bindings => cowboy_router:bindings(),
+
+	has_body := boolean(),
+	body_length := non_neg_integer() | undefined,
+	has_read_body => true,
+	multipart => {binary(), binary()} | done,
+
+	has_sent_resp => headers | true,
+	resp_cookies => #{iodata() => iodata()},
+	resp_headers => #{binary() => iodata()},
+	resp_body => resp_body(),
+
+	proxy_header => ranch_proxy_header:proxy_info(),
+	media_type => {binary(), binary(), [{binary(), binary()}]},
+	language => binary() | undefined,
+	charset => binary() | undefined,
+	range => {binary(), binary()
+		| [{non_neg_integer(), non_neg_integer() | infinity} | neg_integer()]},
+	websocket_version => 7 | 8 | 13
+}.
 -export_type([req/0]).
 
 %% Request.
@@ -415,6 +431,7 @@ parse_header_fun(<<"expect">>) -> fun cow_http_hd:parse_expect/1;
 parse_header_fun(<<"if-match">>) -> fun cow_http_hd:parse_if_match/1;
 parse_header_fun(<<"if-modified-since">>) -> fun cow_http_hd:parse_if_modified_since/1;
 parse_header_fun(<<"if-none-match">>) -> fun cow_http_hd:parse_if_none_match/1;
+parse_header_fun(<<"if-range">>) -> fun cow_http_hd:parse_if_range/1;
 parse_header_fun(<<"if-unmodified-since">>) -> fun cow_http_hd:parse_if_unmodified_since/1;
 parse_header_fun(<<"range">>) -> fun cow_http_hd:parse_range/1;
 parse_header_fun(<<"sec-websocket-extensions">>) -> fun cow_http_hd:parse_sec_websocket_extensions/1;
@@ -534,13 +551,13 @@ read_and_match_urlencoded_body(Fields, Req0, Opts) ->
 %% Multipart.
 
 -spec read_part(Req)
-	-> {ok, cow_multipart:headers(), Req} | {done, Req}
+	-> {ok, cowboy:http_headers(), Req} | {done, Req}
 	when Req::req().
 read_part(Req) ->
 	read_part(Req, #{length => 64000, period => 5000}).
 
 -spec read_part(Req, read_body_opts())
-	-> {ok, #{binary() => binary()}, Req} | {done, Req}
+	-> {ok, cowboy:http_headers(), Req} | {done, Req}
 	when Req::req().
 read_part(Req, Opts) ->
 	case maps:is_key(multipart, Req) of
@@ -754,10 +771,14 @@ reply(Status, Headers, SendFile = {sendfile, _, Len, _}, Req)
 	do_reply(Status, Headers#{
 		<<"content-length">> => integer_to_binary(Len)
 	}, SendFile, Req);
-%% 204 responses must not include content-length. (RFC7230 3.3.1, RFC7230 3.3.2)
-reply(Status=204, Headers, Body, Req) ->
+%% 204 responses must not include content-length. 304 responses may
+%% but only when set explicitly. (RFC7230 3.3.1, RFC7230 3.3.2)
+reply(Status, Headers, Body, Req)
+		when Status =:= 204; Status =:= 304 ->
 	do_reply(Status, Headers, Body, Req);
 reply(Status= <<"204",_/bits>>, Headers, Body, Req) ->
+	do_reply(Status, Headers, Body, Req);
+reply(Status= <<"304",_/bits>>, Headers, Body, Req) ->
 	do_reply(Status, Headers, Body, Req);
 reply(Status, Headers, Body, Req)
 		when is_integer(Status); is_binary(Status) ->
@@ -791,21 +812,35 @@ stream_reply(Status, Headers=#{}, Req=#{pid := Pid, streamid := StreamID})
 	Pid ! {{Pid, StreamID}, {headers, Status, response_headers(Headers, Req)}},
 	done_replying(Req, headers).
 
--spec stream_body(iodata(), fin | nofin, req()) -> ok.
+-spec stream_body(resp_body(), fin | nofin, req()) -> ok.
 %% Error out if headers were not sent.
 %% Don't send any body for HEAD responses.
 stream_body(_, _, #{method := <<"HEAD">>, has_sent_resp := headers}) ->
 	ok;
 %% Don't send a message if the data is empty, except for the
-%% very last message with IsFin=fin.
-stream_body(Data, IsFin=nofin, #{pid := Pid, streamid := StreamID, has_sent_resp := headers}) ->
+%% very last message with IsFin=fin. When using sendfile this
+%% is converted to a data tuple, however.
+stream_body({sendfile, _, 0, _}, nofin, _) ->
+	ok;
+stream_body({sendfile, _, 0, _}, IsFin=fin,
+		#{pid := Pid, streamid := StreamID, has_sent_resp := headers}) ->
+	Pid ! {{Pid, StreamID}, {data, IsFin, <<>>}},
+	ok;
+stream_body({sendfile, O, B, P}, IsFin,
+		#{pid := Pid, streamid := StreamID, has_sent_resp := headers})
+		when is_integer(O), O >= 0, is_integer(B), B > 0 ->
+	Pid ! {{Pid, StreamID}, {data, IsFin, {sendfile, O, B, P}}},
+	ok;
+stream_body(Data, IsFin=nofin, #{pid := Pid, streamid := StreamID, has_sent_resp := headers})
+		when not is_tuple(Data) ->
 	case iolist_size(Data) of
 		0 -> ok;
 		_ ->
 			Pid ! {{Pid, StreamID}, {data, IsFin, Data}},
 			ok
 	end;
-stream_body(Data, IsFin, #{pid := Pid, streamid := StreamID, has_sent_resp := headers}) ->
+stream_body(Data, IsFin, #{pid := Pid, streamid := StreamID, has_sent_resp := headers})
+		when not is_tuple(Data) ->
 	Pid ! {{Pid, StreamID}, {data, IsFin, Data}},
 	ok.
 
@@ -821,7 +856,7 @@ stream_trailers(Trailers, #{pid := Pid, streamid := StreamID, has_sent_resp := h
 	Pid ! {{Pid, StreamID}, {trailers, Trailers}},
 	ok.
 
--spec push(binary(), cowboy:http_headers(), req()) -> ok.
+-spec push(iodata(), cowboy:http_headers(), req()) -> ok.
 push(Path, Headers, Req) ->
 	push(Path, Headers, Req, #{}).
 

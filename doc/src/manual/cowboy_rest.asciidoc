@@ -175,6 +175,9 @@ req() :: #{
 }
 ----
 
+Note that Cowboy will only append the charset to the
+content-type header of the response if the media type is text.
+
 === content_types_accepted
 
 [source,erlang]
@@ -272,6 +275,16 @@ Cowboy treats all parameters as case sensitive, except for the
 should therefore always provide the charset as a lowercase
 binary string.
 
+When a charset is given in the media type parameters in the
+accept header, Cowboy will do some additional checks to confirm
+that it can use this charset. When the wildcard is used then Cowboy
+will immediately call `charsets_provided` to confirm the charset
+is acceptable. If the callback is undefined Cowboy assumes any
+charset is acceptable. When the wildcard is not used and the charset
+given in the accept header matches one of the configured media
+types Cowboy will use that charset and skip the `charsets_provided`
+step entirely.
+
 Cowboy will add the negotiated `media_type` to the Req object
 after this step completes:
 
@@ -283,6 +296,16 @@ req() :: #{
 ----
 
 // @todo Case sensitivity of parsed mime content?
+
+Cowboy may also add the negotiated `charset` to the Req object
+after this step completes:
+
+[source,erlang]
+----
+req() :: #{
+    charset => binary()  %% lowercase; case insensitive
+}
+----
 
 === delete_completed
 
@@ -527,6 +550,10 @@ links to the different representations. If the server has
 a preferred representation it can send its link inside a
 location header.
 
+Note that when replying manually in this callback you
+should either call `cowboy_req:reply/4` or remove the
+response body that Cowboy sets to avoid surprises.
+
 === options
 
 [source,erlang]
@@ -579,6 +606,30 @@ It was temporarily removed and will be added back in a later
 release.
 
 // @todo Add a way to switch to loop handler for streaming the body.
+
+=== rate_limited
+
+[source,erlang]
+----
+rate_limited(Req, State) -> {Result, Req, State}
+
+Result     :: false | {true, RetryAfter}
+RetryAfter :: non_neg_integer() | calendar:datetime()
+Default  - false
+----
+
+Return whether the user is rate limited.
+
+This function can be used to temporarily restrict
+access to a resource when the user has issued too
+many requests.
+
+When the resource is rate limited the `RetryAfter`
+value will be sent in the retry-after header for the
+'429 Too Many Requests' response. It indicates when
+the resource will become available again and can be
+specified as a number of seconds in the future or a
+specific date/time.
 
 === resource_exists
 
@@ -673,6 +724,7 @@ listed here, like the authorization header.
 
 == Changelog
 
+* *2.6*: The callback `rate_limited` was added.
 * *2.1*: The `switch_handler` return value was added.
 * *1.0*: Behavior introduced.
 

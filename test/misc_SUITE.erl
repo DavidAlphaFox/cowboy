@@ -18,7 +18,6 @@
 
 -import(ct_helper, [config/2]).
 -import(ct_helper, [doc/1]).
--import(ct_helper, [name/0]).
 -import(cowboy_test, [gun_open/1]).
 
 all() ->
@@ -51,6 +50,13 @@ init_dispatch(_) ->
 		{"/", hello_h, []}
 	]}]).
 
+%% Logger function silencing the expected crash.
+
+error("Ranch listener " ++ _, [set_env_missing|_]) ->
+	ok;
+error(Format, Args) ->
+	error_logger:error_msg(Format, Args).
+
 %% Tests.
 
 restart_gracefully(Config) ->
@@ -80,28 +86,36 @@ router_invalid_path(Config) ->
 
 set_env(Config0) ->
 	doc("Live replace a middleware environment value."),
-	Config = cowboy_test:init_http(name(), #{
+	Config = cowboy_test:init_http(?FUNCTION_NAME, #{
 		env => #{dispatch => []}
 	}, Config0),
-	ConnPid1 = gun_open(Config),
-	Ref1 = gun:get(ConnPid1, "/"),
-	{response, _, 400, _} = gun:await(ConnPid1, Ref1),
-	cowboy:set_env(name(), dispatch, init_dispatch(Config)),
-	%% Only new connections get the updated environment.
-	ConnPid2 = gun_open(Config),
-	Ref2 = gun:get(ConnPid2, "/"),
-	{response, _, 200, _} = gun:await(ConnPid2, Ref2),
-	ok.
+	try
+		ConnPid1 = gun_open(Config),
+		Ref1 = gun:get(ConnPid1, "/"),
+		{response, _, 400, _} = gun:await(ConnPid1, Ref1),
+		cowboy:set_env(?FUNCTION_NAME, dispatch, init_dispatch(Config)),
+		%% Only new connections get the updated environment.
+		ConnPid2 = gun_open(Config),
+		Ref2 = gun:get(ConnPid2, "/"),
+		{response, _, 200, _} = gun:await(ConnPid2, Ref2)
+	after
+		cowboy:stop_listener(?FUNCTION_NAME)
+	end.
 
 set_env_missing(Config0) ->
 	doc("Live replace a middleware environment value when env was not provided."),
-	Config = cowboy_test:init_http(name(), #{}, Config0),
-	ConnPid1 = gun_open(Config),
-	Ref1 = gun:get(ConnPid1, "/"),
-	{response, _, 500, _} = gun:await(ConnPid1, Ref1),
-	cowboy:set_env(name(), dispatch, []),
-	%% Only new connections get the updated environment.
-	ConnPid2 = gun_open(Config),
-	Ref2 = gun:get(ConnPid2, "/"),
-	{response, _, 400, _} = gun:await(ConnPid2, Ref2),
-	ok.
+	Config = cowboy_test:init_http(?FUNCTION_NAME, #{
+		logger => ?MODULE
+	}, Config0),
+	try
+		ConnPid1 = gun_open(Config),
+		Ref1 = gun:get(ConnPid1, "/"),
+		{response, _, 500, _} = gun:await(ConnPid1, Ref1),
+		cowboy:set_env(?FUNCTION_NAME, dispatch, []),
+		%% Only new connections get the updated environment.
+		ConnPid2 = gun_open(Config),
+		Ref2 = gun:get(ConnPid2, "/"),
+		{response, _, 400, _} = gun:await(ConnPid2, Ref2)
+	after
+		cowboy:stop_listener(?FUNCTION_NAME)
+	end.

@@ -17,7 +17,6 @@
 -compile(nowarn_export_all).
 
 -import(ct_helper, [doc/1]).
--import(ct_helper, [name/0]).
 -import(cowboy_test, [gun_open/1]).
 -import(cowboy_test, [gun_down/1]).
 -import(cowboy_test, [raw_open/1]).
@@ -173,11 +172,6 @@ timeout_after_request_line_host_crlfcr(Config) ->
 		"A 408 status code must be sent if the request line was received."),
 	#{code := 408, client := Client4} = do_raw(Config, "GET / HTTP/1.1\r\nHost: localhost\r\n\r"),
 	{error, closed} = raw_recv(Client4, 0, 6000).
-
-%% @todo Add an HTTP/1.0 test suite.
-%An HTTP/1.1 server must understand any valid HTTP/1.0 request,
-%and respond to those with an HTTP/1.1 message that only use
-%features understood or safely ignored by HTTP/1.0 clients. (RFC7230 A)
 
 %% Request line.
 
@@ -646,6 +640,15 @@ invalid_request_target(Config) ->
 		"\r\n"),
 	{error, closed} = raw_recv(Client, 0, 1000).
 
+missing_request_target(Config) ->
+	doc("The lack of request target must be rejected with a 400 status code "
+		"and the closing of the connection."),
+	#{code := 400, client := Client} = do_raw(Config,
+		"GET  HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"),
+	{error, closed} = raw_recv(Client, 0, 1000).
+
 %% Between request-target and version.
 
 reject_tab_between_request_target_and_version(Config) ->
@@ -704,7 +707,8 @@ reject_invalid_version_http2(Config) ->
 
 reject_empty_version(Config) ->
 	doc("Any version number other than HTTP/1.0 or HTTP/1.1 must be "
-		"rejected by a server or intermediary with a 505 status code. (RFC7230 2.6, RFC7230 A.2)"),
+		"rejected by a server or intermediary with a 505 status code. "
+		"(RFC7230 2.6, RFC7230 A, RFC7230 A.2)"),
 	#{code := 505} = do_raw(Config,
 		"GET / \r\n"
 		"Host: localhost\r\n"
@@ -1391,28 +1395,51 @@ remove_transfer_encoding_chunked_after_body_read(Config) ->
 %HTTP version. (RFC7230 6.3)
 
 no_connection_header_keepalive(Config) ->
-	doc("HTTP/1.1 requests with no \"close\" option and HTTP/1.0 with the "
-		"\"keep-alive\" option indicate the connection will persist. (RFC7230 6.1, RFC7230 6.3)"),
-	#{code := 200, client := Client} = do_raw(Config, [
+	doc("HTTP/1.1 requests with no \"close\" option "
+		"indicate the connection will persist. (RFC7230 6.1, RFC7230 6.3)"),
+	#{code := 200, headers := RespHeaders, client := Client} = do_raw(Config, [
 		"GET / HTTP/1.1\r\n"
 		"Host: localhost\r\n"
 		"\r\n"]),
+	false = lists:keyfind(<<"connection">>, 1, RespHeaders),
 	{error, timeout} = raw_recv(Client, 0, 1000).
 
-%% @todo http/1.0 suite? connection_keepalive(Config) ->
+http10_connection_keepalive(Config) ->
+	doc("HTTP/1.0 requests with the \"keep-alive\" option "
+		"indicate the connection will persist. "
+		"(RFC7230 6.1, RFC7230 6.3, RFC7230 A.1.2)"),
+	#{code := 200, headers := RespHeaders, client := Client} = do_raw(Config, [
+		"GET / HTTP/1.0\r\n"
+		"Host: localhost\r\n"
+		"Connection: keep-alive\r\n"
+		"\r\n"]),
+	{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, RespHeaders),
+	{error, timeout} = raw_recv(Client, 0, 1000).
 
 connection_close(Config) ->
 	doc("HTTP/1.1 requests with the \"close\" option and HTTP/1.0 with no "
 		"\"keep-alive\" option indicate the connection will be closed "
 		"upon reception of the response by the client. (RFC7230 6.1, RFC7230 6.3)"),
-	#{code := 200, client := Client} = do_raw(Config, [
+	#{code := 200, headers := RespHeaders, client := Client} = do_raw(Config, [
 		"GET / HTTP/1.1\r\n"
 		"Host: localhost\r\n"
 		"Connection: close\r\n"
 		"\r\n"]),
+	{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, RespHeaders),
 	{error, closed} = raw_recv(Client, 0, 1000).
 
-%% @todo http/1.0 suite? no_connection_close(Config) ->
+http10_no_connection_header_close(Config) ->
+	doc("HTTP/1.0 with no \"keep-alive\" option indicate "
+		"the connection will be closed upon reception of "
+		"the response by the client. (RFC7230 6.1, RFC7230 6.3, RFC7230 A.1.2)"),
+	#{code := 200, headers := RespHeaders, client := Client} = do_raw(Config, [
+		"GET / HTTP/1.0\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	%% Cowboy always sends a close header back to HTTP/1.0 clients
+	%% that support keep-alive, even though it is not required.
+	{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, RespHeaders),
+	{error, closed} = raw_recv(Client, 0, 1000).
 
 limit_requests_keepalive(Config) ->
 	doc("The maximum number of requests sent using a persistent connection "
@@ -1431,6 +1458,22 @@ limit_requests_keepalive(Config) ->
 	{ok, <<"Hello world!">>} = gun:await_body(ConnPid, Ref),
 	{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, RespHeaders),
 	gun_down(ConnPid).
+
+accept_at_least_1_empty_line_keepalive(Config) ->
+	doc("A configurable number of empty lines (CRLF) preceding the request "
+		"must be ignored. At least 1 empty line must be ignored. (RFC7230 3.5)"),
+	#{code := 200, client := Client} = do_raw(Config,
+		"GET / HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"
+		%% We send an extra CRLF that must be ignored.
+		"\r\n"),
+	ok = raw_send(Client,
+		"GET / HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"),
+	{'HTTP/1.1', 200, _, _} = cow_http:parse_status_line(raw_recv_head(Client)),
+	ok.
 
 %skip_request_body_by_closing_connection(Config) ->
 %%A server that doesn't want to read the entire body of a message
@@ -1550,9 +1593,20 @@ reject_missing_host(Config) ->
 		"\r\n"]),
 	{error, closed} = raw_recv(Client, 0, 1000).
 
-%% @todo http/1.0 missing_host(Config) ->
-%An HTTP/1.0 request that lack a host header is valid. Behavior
-%for these requests is configuration dependent. (RFC7230 5.5)
+http10_allow_missing_host(Config0) ->
+	doc("An HTTP/1.0 request that lacks a host header may be accepted. "
+		"(RFC7230 5.4, RFC7230 5.5, RFC7230 A.1.1)"),
+	Routes = [{'_', [{"/echo/:key[/:arg]", echo_h, []}]}],
+	Config = cowboy_test:init_http(?FUNCTION_NAME, #{
+		env => #{dispatch => cowboy_router:compile(Routes)}
+	}, Config0),
+	try
+		#{code := 200, body := <<>>} = do_raw(Config, [
+			"GET /echo/host HTTP/1.0\r\n"
+			"\r\n"])
+	after
+		cowboy:stop_listener(?FUNCTION_NAME)
+	end.
 
 reject_invalid_host(Config) ->
 	doc("A request with an invalid host header must be rejected with a "
@@ -1591,23 +1645,36 @@ reject_absolute_form_different_host(Config) ->
 empty_host(Config0) ->
 	doc("The host header is empty when the authority component is undefined. (RFC7230 5.4)"),
 	Routes = [{'_', [{"/echo/:key[/:arg]", echo_h, []}]}],
-	Config = cowboy_test:init_http(name(), #{
+	Config = cowboy_test:init_http(?FUNCTION_NAME, #{
 		env => #{dispatch => cowboy_router:compile(Routes)}
 	}, Config0),
-	#{code := 200, body := <<>>} = do_raw(Config, [
-		"GET /echo/host HTTP/1.1\r\n"
-		"Host:\r\n"
-		"\r\n"]),
-	#{code := 200, body := <<>>} = do_raw(Config, [
-		"GET /echo/host HTTP/1.1\r\n"
-		"Host: \r\n"
-		"\r\n"]),
-	cowboy:stop_listener(name()).
+	try
+		#{code := 200, body := <<>>} = do_raw(Config, [
+			"GET /echo/host HTTP/1.1\r\n"
+			"Host:\r\n"
+			"\r\n"]),
+		#{code := 200, body := <<>>} = do_raw(Config, [
+			"GET /echo/host HTTP/1.1\r\n"
+			"Host: \r\n"
+			"\r\n"])
+	after
+		cowboy:stop_listener(?FUNCTION_NAME)
+	end.
 
 %% The effective request URI can be rebuilt by concatenating scheme,
 %% "://", authority, path and query components. (RFC7230 5.5)
 %%
 %% This is covered in req_SUITE in the tests for cowboy_req:uri/1,2.
+
+reject_non_authoritative_host(Config) ->
+	doc("A request with a host header for which the origin server is "
+		"not authoritative must be rejected with a 400 status code. "
+		"(RFC7230 5.5, RFC7230 9.1)"),
+	#{code := 400} = do_raw(Config, [
+		"GET / HTTP/1.1\r\n"
+		"Host: ninenines.eu\r\n"
+		"\r\n"]),
+	ok.
 
 %@todo
 %Resources with identical URI except for the scheme component
@@ -1745,9 +1812,55 @@ no_body_in_head_response(Config) ->
 %no_body_in_100_response(Config) ->
 %no_body_in_101_response(Config) ->
 %no_body_in_102_response(Config) ->
-%no_body_in_204_response(Config) ->
-%no_body_in_304_response(Config) ->
-%1xx, 204 and 304 responses never include a message body. (RFC7230 3.3)
+%1xx responses never include a message body. (RFC7230 3.3)
+
+no_body_in_204_response(Config) ->
+	doc("204 responses never include a message body. (RFC7230 3.3)"),
+	Client = raw_open(Config),
+	ok = raw_send(Client, [
+		"GET /resp/reply2/204 HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	{_, 204, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
+	{_, <<>>} = cow_http:parse_headers(Rest),
+	{error, timeout} = raw_recv(Client, 1, 1000),
+	ok.
+
+no_body_in_204_response_stream(Config) ->
+	doc("204 responses never include a message body. (RFC7230 3.3)"),
+	Client = raw_open(Config),
+	ok = raw_send(Client, [
+		"GET /resp/stream_reply2/204 HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	{_, 204, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
+	{_, <<>>} = cow_http:parse_headers(Rest),
+	{error, timeout} = raw_recv(Client, 1, 1000),
+	ok.
+
+no_body_in_304_response(Config) ->
+	doc("304 responses never include a message body. (RFC7230 3.3)"),
+	Client = raw_open(Config),
+	ok = raw_send(Client, [
+		"GET /resp/reply2/304 HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	{_, 304, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
+	{_, <<>>} = cow_http:parse_headers(Rest),
+	{error, timeout} = raw_recv(Client, 1, 1000),
+	ok.
+
+no_body_in_304_response_stream(Config) ->
+	doc("304 responses never include a message body. (RFC7230 3.3)"),
+	Client = raw_open(Config),
+	ok = raw_send(Client, [
+		"GET /resp/stream_reply2/304 HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	{_, 304, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
+	{_, <<>>} = cow_http:parse_headers(Rest),
+	{error, timeout} = raw_recv(Client, 1, 1000),
+	ok.
 
 same_content_length_as_get_in_head_response(Config) ->
 	doc("Responses to HEAD requests can include a content-length header. "
@@ -1798,6 +1911,20 @@ no_content_length_in_204_response(Config) ->
 		"Host: localhost\r\n"
 		"\r\n"]),
 	{_, 204, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
+	{Headers, <<>>} = cow_http:parse_headers(Rest),
+	false = lists:keyfind(<<"content-length">>, 1, Headers),
+	ok.
+
+no_content_length_in_empty_304_response(Config) ->
+	doc("304 responses should not include a content-length header, "
+		"unless it matches the resource's and was therefore set "
+		"explicitly by the user. (RFC7230 3.3.1, RFC7230 3.3.2)"),
+	Client = raw_open(Config),
+	ok = raw_send(Client, [
+		"GET /resp/reply3/304 HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"\r\n"]),
+	{_, 304, _, Rest} = cow_http:parse_status_line(raw_recv_head(Client)),
 	{Headers, <<>>} = cow_http:parse_headers(Rest),
 	false = lists:keyfind(<<"content-length">>, 1, Headers),
 	ok.
@@ -1891,7 +2018,8 @@ no_content_length_if_transfer_encoding(Config) ->
 http10_request_no_transfer_encoding_in_response(Config) ->
 	doc("The transfer-encoding header must not be sent in responses to "
 		"HTTP/1.0 requests, or in responses that use the HTTP/1.0 version. "
-		"No transfer codings must be applied in these cases. (RFC7230 3.3.1)"),
+		"No transfer codings must be applied in these cases. "
+		"(RFC7230 3.3.1, RFC7230 A.1.3)"),
 	Client = raw_open(Config),
 	ok = raw_send(Client, [
 		"GET /resp/stream_reply2/200 HTTP/1.0\r\n"

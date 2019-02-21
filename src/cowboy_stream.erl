@@ -32,7 +32,7 @@
 -type commands() :: [{inform, cowboy:http_status(), cowboy:http_headers()}
 	| resp_command()
 	| {headers, cowboy:http_status(), cowboy:http_headers()}
-	| {data, fin(), iodata()}
+	| {data, fin(), cowboy_req:resp_body()}
 	| {trailers, cowboy:http_headers()}
 	| {push, binary(), binary(), binary(), inet:port_number(),
 		binary(), binary(), cowboy:http_headers()}
@@ -41,6 +41,7 @@
 	| {error_response, cowboy:http_status(), cowboy:http_headers(), iodata()}
 	| {switch_protocol, cowboy:http_headers(), module(), state()}
 	| {internal_error, any(), human_reason()}
+	| {set_options, map()}
 	| {log, logger:level(), io:format(), list()}
 	| stop].
 -export_type([commands/0]).
@@ -50,7 +51,7 @@
 	| {socket_error, closed | atom(), human_reason()}
 	| {stream_error, cow_http2:error(), human_reason()}
 	| {connection_error, cow_http2:error(), human_reason()}
-	| {stop, cow_http2:frame(), human_reason()}.
+	| {stop, cow_http2:frame() | {exit, any()}, human_reason()}.
 -export_type([reason/0]).
 
 -type partial_req() :: map(). %% @todo Take what's in cowboy_req with everything? optional.

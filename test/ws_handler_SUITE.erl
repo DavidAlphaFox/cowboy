@@ -50,7 +50,9 @@ init_dispatch(Name) ->
 		{"/init", ws_init_commands_h, RunOrHibernate},
 		{"/handle", ws_handle_commands_h, RunOrHibernate},
 		{"/info", ws_info_commands_h, RunOrHibernate},
-		{"/active", ws_active_commands_h, RunOrHibernate}
+		{"/active", ws_active_commands_h, RunOrHibernate},
+		{"/deflate", ws_deflate_commands_h, RunOrHibernate},
+		{"/set_options", ws_set_options_commands_h, RunOrHibernate}
 	]}]).
 
 %% Support functions for testing using Gun.
@@ -217,3 +219,70 @@ websocket_active_false(Config) ->
 	{ok, {text, <<"Not received until the handler enables active again.">>}}
 		= receive_ws(ConnPid, StreamRef),
 	ok.
+
+websocket_deflate_false(Config) ->
+	doc("The {deflate, false} command temporarily disables compression. "
+		"The {deflate, true} command reenables it."),
+	%% We disable context takeover so that the compressed data
+	%% does not change across all frames.
+	{ok, Socket, Headers} = ws_SUITE:do_handshake("/deflate",
+		"Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover\r\n", Config),
+	{_, "permessage-deflate; server_no_context_takeover"}
+		= lists:keyfind("sec-websocket-extensions", 1, Headers),
+	%% The handler receives a compressed "Hello" frame and
+	%% sends back a compressed or uncompressed echo intermittently.
+	Mask = 16#11223344,
+	CompressedHello = <<242, 72, 205, 201, 201, 7, 0>>,
+	MaskedHello = ws_SUITE:do_mask(CompressedHello, Mask, <<>>),
+	%% First echo is compressed.
+	ok = gen_tcp:send(Socket, <<1:1, 1:1, 0:2, 1:4, 1:1, 7:7, Mask:32, MaskedHello/binary>>),
+	{ok, <<1:1, 1:1, 0:2, 1:4, 0:1, 7:7, CompressedHello/binary>>} = gen_tcp:recv(Socket, 0, 6000),
+	%% Second echo is not compressed when it is received back.
+	ok = gen_tcp:send(Socket, <<1:1, 1:1, 0:2, 1:4, 1:1, 7:7, Mask:32, MaskedHello/binary>>),
+	{ok, <<1:1, 0:3, 1:4, 0:1, 5:7, "Hello">>} = gen_tcp:recv(Socket, 0, 6000),
+	%% Third echo is compressed again.
+	ok = gen_tcp:send(Socket, <<1:1, 1:1, 0:2, 1:4, 1:1, 7:7, Mask:32, MaskedHello/binary>>),
+	{ok, <<1:1, 1:1, 0:2, 1:4, 0:1, 7:7, CompressedHello/binary>>} = gen_tcp:recv(Socket, 0, 6000),
+	%% Client-initiated close.
+	ok = gen_tcp:send(Socket, << 1:1, 0:3, 8:4, 1:1, 0:7, 0:32 >>),
+	{ok, << 1:1, 0:3, 8:4, 0:8 >>} = gen_tcp:recv(Socket, 0, 6000),
+	{error, closed} = gen_tcp:recv(Socket, 0, 6000),
+	ok.
+
+websocket_deflate_ignore_if_not_negotiated(Config) ->
+	doc("The {deflate, boolean()} commands are ignored "
+		"when compression was not negotiated."),
+	{ok, ConnPid, StreamRef} = gun_open_ws(Config, "/deflate", []),
+	_ = [begin
+		gun:ws_send(ConnPid, {text, <<"Hello.">>}),
+		{ok, {text, <<"Hello.">>}} = receive_ws(ConnPid, StreamRef)
+	end || _ <- lists:seq(1, 10)],
+	ok.
+
+websocket_set_options_idle_timeout(Config) ->
+	doc("The idle_timeout option can be modified using the "
+		"command {set_options, Opts} at runtime."),
+	ConnPid = gun_open(Config),
+	StreamRef = gun:ws_upgrade(ConnPid, "/set_options"),
+	receive
+		{gun_upgrade, ConnPid, StreamRef, [<<"websocket">>], _} ->
+			ok;
+		{gun_response, ConnPid, _, _, Status, Headers} ->
+			exit({ws_upgrade_failed, Status, Headers});
+		{gun_error, ConnPid, StreamRef, Reason} ->
+			exit({ws_upgrade_failed, Reason})
+	after 1000 ->
+		error(timeout)
+	end,
+	%% We don't send anything for a short while and confirm
+	%% that idle_timeout does not trigger.
+	{error, timeout} = gun:await(ConnPid, StreamRef, 2000),
+	%% Trigger the change in idle_timeout and confirm that
+	%% the connection gets closed soon after.
+	gun:ws_send(ConnPid, {text, <<"idle_timeout_short">>}),
+	receive
+		{gun_down, ConnPid, _, _, _, _} ->
+			ok
+	after 2000 ->
+		error(timeout)
+	end.
